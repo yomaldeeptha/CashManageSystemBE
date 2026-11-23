@@ -1,0 +1,10 @@
+import { Module } from '@nestjs/common';
+import { NumberSeriesController } from './number-series.controller';
+import { NumberSeriesService } from './number-series.service';
+
+@Module({
+  controllers: [NumberSeriesController],
+  providers: [NumberSeriesService],
+  exports: [NumberSeriesService],
+})
+export class NumberSeriesModule {}

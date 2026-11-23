@@ -1,0 +1,2047 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ============================================================================
+// 1. MASTER DATA CATALOGS (25 CATALOGS — NORMALIZED RELATIONAL TABLES)
+// ============================================================================
+
+model Company {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique @db.VarChar(50)
+  name             String   @db.VarChar(150)
+  registrationNo   String?  @db.VarChar(100)
+  taxId            String?  @db.VarChar(100)
+  country          String   @default("Maldives") @db.VarChar(100)
+  baseCurrencyCode String   @default("USD") @db.VarChar(10)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  branches               Branch[]
+  userAccess             UserCompanyAccess[]
+  businessConfigs        BusinessConfig[]
+  cashDeposits           CashDeposit[]
+  cashierPayments        CashierPayment[]
+  cashierSettlements     CashierSettlement[]
+  cashCollectionReceipts CashCollectionReceipt[]
+  mainCashierPayments    MainCashierPayment[]
+  mainCashierSettlements MainCashierSettlement[]
+  outletBankDeposits     OutletBankDeposit[]
+  bankReconciliations    BankReconciliation[]
+  pettyCashRequests      PettyCashRequest[]
+  pettyCashAdvances      PettyCashAdvance[]
+  pettyCashBills         PettyCashBillSubmission[]
+  pettyCashReturns       PettyCashReturn[]
+  floatReimbursements    FloatReimbursement[]
+  salesReconciliations   SalesReconciliation[]
+  varianceIncidents      VarianceIncident[]
+
+  @@index([isActive])
+  @@map("companies")
+}
+
+model Branch {
+  id          Int      @id @default(autoincrement())
+  companyId   Int
+  code        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(150)
+  city        String   @db.VarChar(100)
+  managerName String?  @db.VarChar(150)
+  contactNo   String?  @db.VarChar(50)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company                Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  outlets                Outlet[]
+  locations              Location[]
+  userAccess             UserBranchAccess[]
+  numberSeries           NumberSeries[]
+  cashDeposits           CashDeposit[]
+  cashierPayments        CashierPayment[]
+  cashierSettlements     CashierSettlement[]
+  cashCollectionReceipts CashCollectionReceipt[]
+  mainCashierPayments    MainCashierPayment[]
+  mainCashierSettlements MainCashierSettlement[]
+  outletBankDeposits     OutletBankDeposit[]
+  bankReconciliations    BankReconciliation[]
+  pettyCashRequests      PettyCashRequest[]
+  pettyCashAdvances      PettyCashAdvance[]
+  pettyCashBills         PettyCashBillSubmission[]
+  pettyCashReturns       PettyCashReturn[]
+  floatReimbursements    FloatReimbursement[]
+  salesReconciliations   SalesReconciliation[]
+  varianceIncidents      VarianceIncident[]
+
+  @@index([companyId])
+  @@index([isActive])
+  @@map("branches")
+}
+
+model Outlet {
+  id            Int      @id @default(autoincrement())
+  branchId      Int
+  code          String   @unique @db.VarChar(50)
+  name          String   @db.VarChar(150)
+  outletType    String   @default("Dine-in & GrabGo") @db.VarChar(100)
+  posTerminals  Int      @default(1)
+  cashiersCount Int      @default(2)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  branch                 Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  employees              Employee[]
+  floatAccounts          FloatAccount[]
+  paymentTerminals       PaymentTerminal[]
+  userAccess             UserOutletAccess[]
+  cashDeposits           CashDeposit[]
+  cashierPayments        CashierPayment[]
+  cashierSettlements     CashierSettlement[]
+  cashCollectionReceipts CashCollectionReceipt[]
+  mainCashierPayments    MainCashierPayment[]
+  mainCashierSettlements MainCashierSettlement[]
+  outletBankDeposits     OutletBankDeposit[]
+  bankReconciliations    BankReconciliation[]
+  pettyCashRequests      PettyCashRequest[]
+  pettyCashAdvances      PettyCashAdvance[]
+  pettyCashBills         PettyCashBillSubmission[]
+  pettyCashReturns       PettyCashReturn[]
+  floatReimbursements    FloatReimbursement[]
+  salesReconciliations   SalesReconciliation[]
+  varianceIncidents      VarianceIncident[]
+
+  @@index([branchId])
+  @@index([isActive])
+  @@map("outlets")
+}
+
+model Department {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique @db.VarChar(50)
+  name             String   @db.VarChar(150)
+  headOfDepartment String?  @db.VarChar(150)
+  budgetCode       String?  @db.VarChar(50)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  employees           Employee[]
+  expenseCategories   ExpenseCategory[]
+  budgets             Budget[]
+  userAccess          UserDepartmentAccess[]
+  cashierPayments     CashierPayment[]
+  mainCashierPayments MainCashierPayment[]
+  pettyCashRequests   PettyCashRequest[]
+  pettyCashAdvances   PettyCashAdvance[]
+  pettyCashBills      PettyCashBillSubmission[]
+  pettyCashReturns    PettyCashReturn[]
+
+  @@index([isActive])
+  @@map("departments")
+}
+
+model Location {
+  id        Int      @id @default(autoincrement())
+  branchId  Int
+  code      String   @unique @db.VarChar(50)
+  name      String   @db.VarChar(150)
+  address   String?  @db.VarChar(255)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@index([branchId])
+  @@map("locations")
+}
+
+model Employee {
+  id           Int      @id @default(autoincrement())
+  empNo        String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  departmentId Int
+  outletId     Int?
+  designation  String   @db.VarChar(100)
+  email        String?  @db.VarChar(120)
+  phone        String?  @db.VarChar(50)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department                 Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  outlet                     Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  users                      User[]
+  floatAccounts              FloatAccount[]
+  cashDepositsAsCashier      CashDeposit[]             @relation("DepositCashier")
+  cashDepositsAsCollector    CashDeposit[]             @relation("DepositCollector")
+  cashierPaymentsAsCashier   CashierPayment[]          @relation("PaymentCashier")
+  cashierPaymentsAsRequester CashierPayment[]          @relation("PaymentRequester")
+  settlementsFrom            CashierSettlement[]       @relation("SettlementFromCashier")
+  settlementsTo              CashierSettlement[]       @relation("SettlementToCashier")
+  mainPaymentsAsRequester    MainCashierPayment[]
+  mainSettlementsFrom        MainCashierSettlement[]
+  pettyCashRequests          PettyCashRequest[]
+  pettyCashAdvances          PettyCashAdvance[]
+  pettyCashBills             PettyCashBillSubmission[]
+  pettyCashIOUs              PettyCashIOU[]
+  salesReconciliations       SalesReconciliation[]
+  varianceIncidents          VarianceIncident[]
+
+  @@index([departmentId])
+  @@index([outletId])
+  @@index([isActive])
+  @@map("employees")
+}
+
+model Shift {
+  id            Int      @id @default(autoincrement())
+  code          String   @unique @db.VarChar(50)
+  name          String   @db.VarChar(100)
+  startTime     String   @db.VarChar(20)
+  endTime       String   @db.VarChar(20)
+  durationHours Int      @default(8)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  salesReconciliations     SalesReconciliation[]
+  salesReconciliationLines SalesReconciliationLine[]
+
+  @@map("shifts")
+}
+
+model Currency {
+  id            Int      @id @default(autoincrement())
+  code          String   @unique @db.VarChar(10)
+  name          String   @db.VarChar(100)
+  symbol        String   @db.VarChar(15)
+  rateToBase    Decimal  @default(1) @db.Decimal(18, 6)
+  localRate     Decimal? @db.Decimal(18, 6)
+  decimalPlaces Int      @default(2)
+  isBase        Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  fromExchangeRates         ExchangeRate[]              @relation("FromCurrency")
+  toExchangeRates           ExchangeRate[]              @relation("ToCurrency")
+  denominations             Denomination[]
+  bankAccounts              BankAccount[]
+  floatAccounts             FloatAccount[]
+  paymentSubTypes           PaymentSubType[]
+  cashDepositCurrencies     CashDepositCurrency[]
+  cashDepositDenominations  CashDepositDenomination[]
+  cashierPayments           CashierPayment[]
+  cashierSettlementLines    CashierSettlementLine[]
+  cashCollectionReceiptLine CashCollectionReceiptLine[]
+  mainCashierPayments       MainCashierPayment[]
+  mainCashierSettleLines    MainCashierSettlementLine[]
+  outletBankDeposits        OutletBankDeposit[]
+  bankReconciliations       BankReconciliation[]
+  pettyCashRequests         PettyCashRequest[]
+  pettyCashAdvances         PettyCashAdvance[]
+  pettyCashBillLines        PettyCashBillLine[]
+  pettyCashReturns          PettyCashReturn[]
+  salesReconciliationLines  SalesReconciliationLine[]
+
+  @@index([isBase])
+  @@index([isActive])
+  @@map("currencies")
+}
+
+model ExchangeRate {
+  id             Int      @id @default(autoincrement())
+  fromCurrencyId Int
+  toCurrencyId   Int
+  rate           Decimal  @db.Decimal(18, 6)
+  effectiveDate  DateTime @db.Date
+  source         String?  @db.VarChar(150)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  fromCurrency Currency @relation("FromCurrency", fields: [fromCurrencyId], references: [id], onDelete: Restrict)
+  toCurrency   Currency @relation("ToCurrency", fields: [toCurrencyId], references: [id], onDelete: Restrict)
+
+  @@index([fromCurrencyId, toCurrencyId, effectiveDate])
+  @@index([isActive])
+  @@map("exchange_rates")
+}
+
+model Denomination {
+  id           Int      @id @default(autoincrement())
+  currencyId   Int
+  value        Decimal  @db.Decimal(18, 2)
+  label        String   @db.VarChar(100)
+  denomType    String   @default("Bill") @db.VarChar(20)
+  displayOrder Int      @default(1)
+  isActive     Boolean  @default(true)
+
+  currency Currency @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@unique([currencyId, value])
+  @@index([currencyId])
+  @@map("denominations")
+}
+
+model Bank {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(150)
+  swiftCode   String?  @db.VarChar(50)
+  country     String   @default("Maldives") @db.VarChar(100)
+  contactInfo String?  @db.VarChar(150)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bankAccounts     BankAccount[]
+  paymentTerminals PaymentTerminal[]
+
+  @@map("banks")
+}
+
+model BankAccount {
+  id             Int      @id @default(autoincrement())
+  bankId         Int
+  currencyId     Int
+  accountNo      String   @unique @db.VarChar(100)
+  name           String   @db.VarChar(150)
+  branchLocation String?  @db.VarChar(150)
+  accountType    String   @default("Current") @db.VarChar(50)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bank                   Bank                    @relation(fields: [bankId], references: [id], onDelete: Restrict)
+  currency               Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  cashCollectionReceipts CashCollectionReceipt[]
+  mainCashierSettlements MainCashierSettlement[]
+  outletBankDeposits     OutletBankDeposit[]
+
+  @@index([bankId])
+  @@index([currencyId])
+  @@map("bank_accounts")
+}
+
+model FloatAccount {
+  id                 Int      @id @default(autoincrement())
+  code               String   @unique @db.VarChar(50)
+  name               String   @db.VarChar(150)
+  currencyId         Int
+  assignedEmployeeId Int?
+  outletId           Int?
+  baseLimit          Decimal  @default(0) @db.Decimal(18, 2)
+  currentBalance     Decimal  @default(0) @db.Decimal(18, 2)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  currency            Currency             @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  assignedEmployee    Employee?            @relation(fields: [assignedEmployeeId], references: [id], onDelete: SetNull)
+  outlet              Outlet?              @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  cashierPayments     CashierPayment[]
+  cashierSettlements  CashierSettlement[]
+  mainCashierPayments MainCashierPayment[]
+  pettyCashAdvances   PettyCashAdvance[]
+  floatReimbursements FloatReimbursement[]
+
+  @@index([currencyId])
+  @@index([assignedEmployeeId])
+  @@index([outletId])
+  @@map("float_accounts")
+}
+
+model GlAccount {
+  id         Int      @id @default(autoincrement())
+  code       String   @unique @db.VarChar(50)
+  name       String   @db.VarChar(150)
+  category   String   @db.VarChar(50)
+  isCashBank Boolean  @default(false)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  expenseCategories ExpenseCategory[]
+  paymentTypes      PaymentType[]
+
+  @@map("gl_accounts")
+}
+
+model Vendor {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(150)
+  category    String   @db.VarChar(100)
+  taxId       String?  @db.VarChar(100)
+  contactInfo String?  @db.VarChar(150)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  cashierPayments     CashierPayment[]
+  mainCashierPayments MainCashierPayment[]
+  pettyCashBillLines  PettyCashBillLine[]
+
+  @@map("vendors")
+}
+
+model ExpenseCategory {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  departmentId Int
+  glAccountId  Int
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department         Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  glAccount          GlAccount           @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
+  expenseTypes       ExpenseType[]
+  pettyCashRequests  PettyCashRequest[]
+  pettyCashAdvances  PettyCashAdvance[]
+  pettyCashBillLines PettyCashBillLine[]
+
+  @@index([departmentId])
+  @@index([glAccountId])
+  @@map("expense_categories")
+}
+
+model ExpenseType {
+  id                Int      @id @default(autoincrement())
+  categoryId        Int
+  code              String   @unique @db.VarChar(50)
+  name              String   @db.VarChar(150)
+  taxApplicable     Boolean  @default(true)
+  requiresQuoteOver Decimal  @default(100) @db.Decimal(18, 2)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  category ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([categoryId])
+  @@map("expense_types")
+}
+
+model Budget {
+  id              Int      @id @default(autoincrement())
+  departmentId    Int
+  fiscalYear      String   @db.VarChar(10)
+  allocatedAmount Decimal  @default(0) @db.Decimal(18, 2)
+  monthlyLimit    Decimal  @default(0) @db.Decimal(18, 2)
+  consumedAmount  Decimal  @default(0) @db.Decimal(18, 2)
+  availableAmount Decimal  @default(0) @db.Decimal(18, 2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  @@unique([departmentId, fiscalYear])
+  @@index([departmentId])
+  @@map("budgets")
+}
+
+model CashAdvanceType {
+  id              Int      @id @default(autoincrement())
+  code            String   @unique @db.VarChar(50)
+  name            String   @db.VarChar(100)
+  description     String?  @db.VarChar(255)
+  defaultMaxLimit Decimal  @default(500) @db.Decimal(18, 2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("cash_advance_types")
+}
+
+model PaymentType {
+  id                    Int      @id @default(autoincrement())
+  code                  String   @unique @db.VarChar(50)
+  name                  String   @db.VarChar(100)
+  autoFillFromProcess01 Boolean  @default(false)
+  glAccountId           Int
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  glAccount                GlAccount                 @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
+  subTypes                 PaymentSubType[]
+  cashDeposits             CashDeposit[]
+  salesReconciliationLines SalesReconciliationLine[]
+
+  @@index([glAccountId])
+  @@map("payment_types")
+}
+
+model PaymentSubType {
+  id               Int      @id @default(autoincrement())
+  paymentTypeId    Int
+  currencyId       Int
+  code             String   @unique @db.VarChar(50)
+  name             String   @db.VarChar(150)
+  surchargePct     Decimal  @default(0) @db.Decimal(5, 2)
+  terminalRequired Boolean  @default(false)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  paymentType PaymentType @relation(fields: [paymentTypeId], references: [id], onDelete: Restrict)
+  currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([paymentTypeId])
+  @@index([currencyId])
+  @@map("payment_sub_types")
+}
+
+model PaymentTerminal {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  terminalName String   @db.VarChar(150)
+  serialNo     String   @unique @db.VarChar(100)
+  outletId     Int
+  bankId       Int
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  bank   Bank   @relation(fields: [bankId], references: [id], onDelete: Restrict)
+
+  @@index([outletId])
+  @@index([bankId])
+  @@map("payment_terminals")
+}
+
+model ApprovalWorkflowMaster {
+  id             Int      @id @default(autoincrement())
+  code           String   @unique @db.VarChar(50)
+  name           String   @db.VarChar(150)
+  stagesCount    Int      @default(3)
+  appliesTo      String   @db.VarChar(150)
+  thresholdLabel String   @db.VarChar(80)
+  thresholdValue Decimal  @default(0) @db.Decimal(18, 2)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("approval_workflows")
+}
+
+model FormMaster {
+  id               Int      @id @default(autoincrement())
+  formId           String   @unique @db.VarChar(60)
+  formName         String   @db.VarChar(150)
+  category         String   @db.VarChar(80)
+  module           String   @db.VarChar(80)
+  screenId         String?  @db.VarChar(60)
+  routeKey         String?  @db.VarChar(100)
+  defaultPrefix    String   @db.VarChar(30)
+  defaultNumDigits Int      @default(4)
+  isTransactional  Boolean  @default(true)
+  makerCheckerType String   @default("Standard") @db.VarChar(60)
+  description      String?  @db.VarChar(255)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  numberSeries NumberSeries[]
+  screens      Screen[]
+
+  @@index([category])
+  @@map("form_masters")
+}
+
+// ============================================================================
+// 2. AUTHENTICATION, USERS, ROLES, GROUPS, SCREEN AUTHORIZATION & CONFIG
+// ============================================================================
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(100)
+  description String?  @db.VarChar(255)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       User[]
+  userGroups  UserGroup[]
+
+  @@map("roles")
+}
+
+model RolePermission {
+  id        Int     @id @default(autoincrement())
+  roleId    Int
+  moduleKey String  @db.VarChar(60)
+  canRead   Boolean @default(false)
+  canCreate Boolean @default(false)
+  canUpdate Boolean @default(false)
+  canDelete Boolean @default(false)
+  canApprove Boolean @default(false)
+  canUnblock Boolean @default(false)
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, moduleKey])
+  @@index([roleId])
+  @@map("role_permissions")
+}
+
+model UserGroup {
+  id            Int      @id @default(autoincrement())
+  groupCode     String   @unique @db.VarChar(50)
+  userGroupId   String   @unique @db.VarChar(50)
+  name          String   @db.VarChar(150)
+  description   String?  @db.VarChar(255)
+  defaultRoleId Int
+  defaultBadge  String   @default("User") @db.VarChar(40)
+  isAllFullAuth Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  defaultRole    Role                     @relation(fields: [defaultRoleId], references: [id], onDelete: Restrict)
+  users          User[]
+  screenDefaults UserGroupScreenDefault[]
+
+  @@map("user_groups")
+}
+
+model Screen {
+  id               Int      @id @default(autoincrement())
+  screenId         String   @unique @db.VarChar(60)
+  formId           String   @db.VarChar(60)
+  screenName       String   @db.VarChar(150)
+  category         String   @db.VarChar(80)
+  routeKey         String   @db.VarChar(120)
+  iconName         String?  @db.VarChar(60)
+  description      String?  @db.VarChar(255)
+  makerCheckerType String   @default("Standard") @db.VarChar(60)
+  supportedActions String[] @default(["view"])
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  formMaster    FormMaster?              @relation(fields: [formId], references: [formId], onDelete: Restrict)
+  groupDefaults UserGroupScreenDefault[]
+  userAuths     UserScreenAuthorization[]
+
+  @@index([routeKey])
+  @@index([category])
+  @@map("screens")
+}
+
+model UserGroupScreenDefault {
+  id          Int     @id @default(autoincrement())
+  userGroupId Int
+  screenId    Int
+  authLevel   Int     @default(4)
+  canAccess   Boolean @default(true)
+  canCreate   Boolean @default(false)
+  canEdit     Boolean @default(false)
+  canApprove  Boolean @default(false)
+  canExport   Boolean @default(false)
+
+  userGroup UserGroup @relation(fields: [userGroupId], references: [id], onDelete: Cascade)
+  screen    Screen    @relation(fields: [screenId], references: [id], onDelete: Cascade)
+
+  @@unique([userGroupId, screenId])
+  @@map("user_group_screen_defaults")
+}
+
+model MenuNode {
+  menuId     Int    @id
+  parentId   Int
+  rootParent Int
+  name       String @db.VarChar(150)
+  type       String @db.VarChar(30)
+  level      Int
+
+  userMenuAuths UserMenuAuthorization[]
+
+  @@index([parentId])
+  @@map("menu_nodes")
+}
+
+model User {
+  id                   Int       @id @default(autoincrement())
+  username             String    @unique @db.VarChar(100)
+  fullName             String    @db.VarChar(150)
+  email                String    @unique @db.VarChar(150)
+  passwordHash         String    @db.VarChar(255)
+  empNo                String?   @db.VarChar(50)
+  designation          String?   @db.VarChar(120)
+  contactNo            String?   @db.VarChar(50)
+  address              String?   @db.VarChar(255)
+  remark               String?   @db.Text
+  avatar               String?   @db.VarChar(10)
+  roleId               Int
+  userGroupId          Int?
+  employeeId           Int?
+  isActive             Boolean   @default(true)
+  isConfirmEmail       Boolean   @default(true)
+  isTemporaryPassword  Boolean   @default(false)
+  requireChangeOnLogin Boolean   @default(false)
+  twoFactorEnabled     Boolean   @default(false)
+  navMenuMode          String    @default("both") @db.VarChar(20)
+  docSectionMode       String    @default("boxes") @db.VarChar(20)
+  preferences          Json?
+  lastLoginAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  role                  Role                      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  userGroup             UserGroup?                @relation(fields: [userGroupId], references: [id], onDelete: SetNull)
+  employee              Employee?                 @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  companyAccess         UserCompanyAccess[]
+  branchAccess          UserBranchAccess[]
+  outletAccess          UserOutletAccess[]
+  departmentAccess      UserDepartmentAccess[]
+  screenAuthorizations  UserScreenAuthorization[]
+  menuAuthorizations    UserMenuAuthorization[]
+  refreshTokens         RefreshToken[]
+  stageApprovals        ApprovalStageApprover[]
+  templateOriginators   ApprovalTemplateOriginator[]
+  submittedApprovals    ApprovalInstance[]        @relation("ApprovalSubmitter")
+  approvalDecisions     ApprovalDecision[]
+  auditLogs             AuditLog[]
+  auditExportBatches    AuditExportBatch[]
+  notificationLogs      NotificationLog[]
+  uploadedAttachments   DocumentAttachment[]
+
+  @@index([roleId])
+  @@index([userGroupId])
+  @@index([isActive])
+  @@map("users")
+}
+
+model RefreshToken {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  tokenHash  String    @unique @db.VarChar(128)
+  deviceInfo String?   @db.VarChar(255)
+  ipAddress  String?   @db.VarChar(64)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model UserCompanyAccess {
+  userId    Int
+  companyId Int
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([userId, companyId])
+  @@map("user_company_access")
+}
+
+model UserBranchAccess {
+  userId   Int
+  branchId Int
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([userId, branchId])
+  @@map("user_branch_access")
+}
+
+model UserOutletAccess {
+  userId   Int
+  outletId Int
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+
+  @@id([userId, outletId])
+  @@map("user_outlet_access")
+}
+
+model UserDepartmentAccess {
+  userId       Int
+  departmentId Int
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@id([userId, departmentId])
+  @@map("user_department_access")
+}
+
+model UserScreenAuthorization {
+  id         Int     @id @default(autoincrement())
+  userId     Int
+  screenId   Int
+  authLevel  Int     @default(6)
+  canAccess  Boolean @default(false)
+  canCreate  Boolean @default(false)
+  canEdit    Boolean @default(false)
+  canApprove Boolean @default(false)
+  canExport  Boolean @default(false)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  screen Screen @relation(fields: [screenId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, screenId])
+  @@index([userId])
+  @@map("user_screen_authorizations")
+}
+
+model UserMenuAuthorization {
+  id        Int @id @default(autoincrement())
+  userId    Int
+  menuId    Int
+  authLevel Int @default(6)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuNode MenuNode @relation(fields: [menuId], references: [menuId], onDelete: Cascade)
+
+  @@unique([userId, menuId])
+  @@index([userId])
+  @@map("user_menu_authorizations")
+}
+
+model NumberSeries {
+  id              Int      @id @default(autoincrement())
+  seriesId        String   @unique @db.VarChar(60)
+  seriesName      String   @db.VarChar(150)
+  formId          String   @db.VarChar(60)
+  prefix          String   @db.VarChar(40)
+  suffix          String   @default("") @db.VarChar(40)
+  initialNumber   Int      @default(1)
+  nextNumber      Int      @default(1)
+  lastNumber      Int      @default(99999)
+  numDigits       Int      @default(4)
+  periodIndicator String   @default("FY2026") @db.VarChar(30)
+  branchId        Int?
+  isDefault       Boolean  @default(false)
+  isLocked        Boolean  @default(false)
+  status          String   @default("Active") @db.VarChar(30)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  formMaster FormMaster @relation(fields: [formId], references: [formId], onDelete: Restrict)
+  branch     Branch?    @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@index([formId, isDefault])
+  @@index([branchId])
+  @@map("number_series")
+}
+
+model BusinessConfig {
+  id                           Int      @id @default(autoincrement())
+  primaryOperatingCompanyId    Int?
+  baseCurrency                 String   @default("USD") @db.VarChar(10)
+  baseSymbol                   String   @default("$") @db.VarChar(15)
+  operationalCurrency          String   @default("MVR") @db.VarChar(10)
+  operationalSymbol            String   @default("Rf") @db.VarChar(15)
+  exchangeRateMode             String   @default("Fixed") @db.VarChar(30)
+  fixedExchangeRateMVR         Decimal  @default(15.42) @db.Decimal(18, 6)
+  fixedExchangeRateEUR         Decimal  @default(1.09) @db.Decimal(18, 6)
+  decimalPrecision             Int      @default(2)
+  roundingMethod               String   @default("standard") @db.VarChar(30)
+  varianceTolerancePercent     Decimal  @default(0.5) @db.Decimal(6, 3)
+  fiscalYearStartMonth         String   @default("January") @db.VarChar(20)
+  currentFiscalYear            String   @default("2026") @db.VarChar(10)
+  dailyShiftCutOffTime         String   @default("23:59") @db.VarChar(10)
+  periodLockEnabled            Boolean  @default(true)
+  transitGracePeriodHours      Int      @default(48)
+  taxRegistrationNo            String   @default("TIN-994012") @db.VarChar(100)
+  defaultTGSTRate              Decimal  @default(16.0) @db.Decimal(6, 2)
+  pettyCashGstRate             Decimal  @default(8.0) @db.Decimal(6, 2)
+  serviceChargeRate            Decimal  @default(10.0) @db.Decimal(6, 2)
+  maxCashAdvanceVoucherBase    Decimal  @default(500.0) @db.Decimal(18, 2)
+  dualSignatoryRequiredBase    Decimal  @default(1000.0) @db.Decimal(18, 2)
+  mandatoryReceiptThresholdBase Decimal @default(25.0) @db.Decimal(18, 2)
+  defaultOutletTillFloatBase   Decimal  @default(2000.0) @db.Decimal(18, 2)
+  highVarianceAlertBase        Decimal  @default(100.0) @db.Decimal(18, 2)
+  iouOverdueEscalationDays     Int      @default(14)
+  maximumIOUValidityDays       Int      @default(30)
+  timezone                     String   @default("Indian/Maldives (UTC+5)") @db.VarChar(80)
+  dateFormat                   String   @default("DD-MMM-YYYY") @db.VarChar(30)
+  timeFormat                   String   @default("12-hour") @db.VarChar(20)
+  currencyPosition             String   @default("prefix") @db.VarChar(20)
+  businessWeekDays             String[] @default(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"])
+  updatedAt                    DateTime @updatedAt
+
+  primaryCompany Company? @relation(fields: [primaryOperatingCompanyId], references: [id], onDelete: SetNull)
+
+  @@map("business_configs")
+}
+
+model NotificationTemplate {
+  id                 Int      @id @default(autoincrement())
+  code               String   @unique @db.VarChar(40)
+  name               String   @db.VarChar(150)
+  triggerEvent       String   @db.VarChar(255)
+  emailEnabled       Boolean  @default(true)
+  systemAlertEnabled Boolean  @default(true)
+  mobilePushEnabled  Boolean  @default(true)
+  targetRoles        String[] @default([])
+  subject            String   @db.VarChar(255)
+  body               String   @db.Text
+  variables          String[] @default([])
+  isActive           Boolean  @default(true)
+  updatedAt          DateTime @updatedAt
+
+  logs NotificationLog[]
+
+  @@map("notification_templates")
+}
+
+model NotificationLog {
+  id              Int      @id @default(autoincrement())
+  templateId      Int?
+  recipientUserId Int?
+  title           String   @db.VarChar(200)
+  message         String   @db.Text
+  channel         String   @default("system") @db.VarChar(30)
+  severity        String   @default("info") @db.VarChar(30)
+  entityType      String?  @db.VarChar(60)
+  entityId        Int?
+  isRead          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  template  NotificationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  recipient User?                 @relation(fields: [recipientUserId], references: [id], onDelete: SetNull)
+
+  @@index([recipientUserId, isRead])
+  @@index([createdAt])
+  @@map("notification_logs")
+}
+
+model PrintTemplate {
+  id           Int      @id @default(autoincrement())
+  templateKey  String   @unique @db.VarChar(40)
+  code         String   @unique @db.VarChar(60)
+  name         String   @db.VarChar(150)
+  process      String   @db.VarChar(60)
+  orientation  String   @default("Portrait") @db.VarChar(20)
+  paperSize    String   @default("A4") @db.VarChar(10)
+  sections     String[] @default([])
+  sampleDoc    String   @db.VarChar(80)
+  headerConfig Json?
+  isActive     Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+
+  @@map("print_templates")
+}
+
+model DocumentAttachment {
+  id             Int      @id @default(autoincrement())
+  entityType     String   @db.VarChar(60)
+  entityId       Int
+  lineRef        String?  @db.VarChar(60)
+  fileName       String   @db.VarChar(255)
+  storedName     String   @db.VarChar(255)
+  mimeType       String   @db.VarChar(120)
+  fileSizeBytes  Int      @default(0)
+  fileSizeLabel  String   @db.VarChar(40)
+  docType        String   @default("Document") @db.VarChar(60)
+  remark         String   @default("") @db.VarChar(500)
+  storagePath    String   @db.VarChar(500)
+  uploadedById   Int?
+  uploadedByName String   @default("") @db.VarChar(150)
+  createdAt      DateTime @default(now())
+
+  uploadedBy User? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@map("document_attachments")
+}
+
+model AuditLog {
+  id              Int      @id @default(autoincrement())
+  entityType      String   @db.VarChar(60)
+  entityId        Int
+  docNo           String?  @db.VarChar(80)
+  action          String   @db.VarChar(60)
+  step            String   @db.VarChar(180)
+  fromStatus      String?  @db.VarChar(50)
+  toStatus        String?  @db.VarChar(50)
+  performedById   Int?
+  performedByName String   @db.VarChar(150)
+  remarks         String?  @db.Text
+  metadata        Json?
+  ipAddress       String?  @db.VarChar(64)
+  createdAt       DateTime @default(now())
+
+  performedBy User? @relation(fields: [performedById], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([docNo])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model AuditExportBatch {
+  id              Int      @id @default(autoincrement())
+  batchCode       String   @unique @db.VarChar(80)
+  format          String   @db.VarChar(20)
+  recordCount     Int      @default(0)
+  totalBaseAmount Decimal  @default(0) @db.Decimal(18, 2)
+  baseCurrency    String   @default("USD") @db.VarChar(10)
+  exportedById    Int
+  payloadSummary  Json?
+  createdAt       DateTime @default(now())
+
+  exportedBy User @relation(fields: [exportedById], references: [id], onDelete: Restrict)
+
+  @@index([createdAt])
+  @@map("audit_export_batches")
+}
+
+// ============================================================================
+// 3. PROCESS 01: CASH COLLECTION DEPOSIT & TREASURY HANDOVER
+// ============================================================================
+
+model CashDeposit {
+  id               Int       @id @default(autoincrement())
+  docNo            String    @unique @db.VarChar(60)
+  docDate          DateTime  @db.Date
+  collectionDate   DateTime  @db.Date
+  collectionTime   String    @db.VarChar(20)
+  companyId        Int
+  branchId         Int
+  outletId         Int
+  cashierId        Int
+  cashCollectorId  Int
+  paymentTypeId    Int
+  envelopeNo       String    @db.VarChar(100)
+  receiveFrom      String?   @db.VarChar(200)
+  baseCurrencyCode String    @default("USD") @db.VarChar(10)
+  totalBaseAmount  Decimal   @default(0) @db.Decimal(18, 2)
+  status           String    @default("Draft") @db.VarChar(40)
+  remark           String?   @db.Text
+  createdById      Int?
+  updatedById      Int?
+  approvedById     Int?
+  approvedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  company                  Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch                   Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet                   Outlet                    @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  cashier                  Employee                  @relation("DepositCashier", fields: [cashierId], references: [id], onDelete: Restrict)
+  cashCollector            Employee                  @relation("DepositCollector", fields: [cashCollectorId], references: [id], onDelete: Restrict)
+  paymentType              PaymentType               @relation(fields: [paymentTypeId], references: [id], onDelete: Restrict)
+  currencies               CashDepositCurrency[]
+  denominations            CashDepositDenomination[]
+  bankDepositItems         OutletBankDepositItem[]
+  linkedReconciliations    SalesReconciliation[]
+  autoFilledReconLines     SalesReconciliationLine[]
+
+  @@index([companyId, branchId, outletId])
+  @@index([collectionDate])
+  @@index([status])
+  @@map("cash_deposits")
+}
+
+model CashDepositCurrency {
+  id            Int     @id @default(autoincrement())
+  cashDepositId Int
+  currencyId    Int
+  amount        Decimal @db.Decimal(18, 2)
+  exRate        Decimal @db.Decimal(18, 6)
+  baseAmount    Decimal @db.Decimal(18, 2)
+
+  cashDeposit CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
+  currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([cashDepositId])
+  @@index([currencyId])
+  @@map("cash_deposit_currencies")
+}
+
+model CashDepositDenomination {
+  id                Int     @id @default(autoincrement())
+  cashDepositId     Int
+  currencyId        Int
+  denominationValue Decimal @db.Decimal(18, 2)
+  noteCount         Int     @default(0)
+
+  cashDeposit CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
+  currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([cashDepositId])
+  @@index([currencyId])
+  @@map("cash_deposit_denominations")
+}
+
+model CashierPayment {
+  id                 Int      @id @default(autoincrement())
+  docNo              String   @unique @db.VarChar(60)
+  docDate            DateTime @db.Date
+  paymentVoucherNo   String   @unique @db.VarChar(60)
+  paymentDate        DateTime @db.Date
+  companyId          Int
+  branchId           Int
+  outletId           Int
+  cashierId          Int?
+  cashierName        String   @db.VarChar(150)
+  requesterId        Int?
+  requesterName      String   @db.VarChar(150)
+  vendorId           Int?
+  vendorName         String   @db.VarChar(150)
+  departmentId       Int?
+  departmentName     String   @db.VarChar(150)
+  floatAccountId     Int?
+  floatAccountName   String   @db.VarChar(180)
+  currencyId         Int
+  cashAdvanceType    String   @db.VarChar(80)
+  amount             Decimal  @db.Decimal(18, 2)
+  baseCurrencyCode   String   @default("USD") @db.VarChar(10)
+  baseAmount         Decimal  @default(0) @db.Decimal(18, 2)
+  totalBalanceInHand Decimal  @default(0) @db.Decimal(18, 2)
+  receiptNumber      String?  @db.VarChar(80)
+  narration          String?  @db.Text
+  denominations      Json?
+  approvalStatus     String   @default("Submitted") @db.VarChar(40)
+  approvedByName     String?  @db.VarChar(150)
+  createdById        Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet       Outlet        @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  cashier      Employee?     @relation("PaymentCashier", fields: [cashierId], references: [id], onDelete: SetNull)
+  requester    Employee?     @relation("PaymentRequester", fields: [requesterId], references: [id], onDelete: SetNull)
+  vendor       Vendor?       @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  department   Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  floatAccount FloatAccount? @relation(fields: [floatAccountId], references: [id], onDelete: SetNull)
+  currency     Currency      @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, outletId])
+  @@index([paymentDate])
+  @@index([approvalStatus])
+  @@map("cashier_payments")
+}
+
+model CashierSettlement {
+  id                   Int       @id @default(autoincrement())
+  docNo                String    @unique @db.VarChar(60)
+  docDate              DateTime  @db.Date
+  fromDate             DateTime  @db.Date
+  toDate               DateTime  @db.Date
+  companyId            Int
+  branchId             Int
+  outletId             Int
+  fromCashierId        Int?
+  fromCashierName      String    @db.VarChar(150)
+  toCashierId          Int?
+  toCashierName        String    @db.VarChar(150)
+  floatAccountId       Int?
+  floatAccountName     String    @db.VarChar(180)
+  baseCurrencyCode     String    @default("USD") @db.VarChar(10)
+  totalTransferBase    Decimal   @default(0) @db.Decimal(18, 2)
+  narration            String?   @db.Text
+  status               String    @default("Pending Acceptance") @db.VarChar(40)
+  acceptedById         Int?
+  acceptedAt           DateTime?
+  createdById          Int?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  company      Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch       Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet       Outlet                  @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  fromCashier  Employee?               @relation("SettlementFromCashier", fields: [fromCashierId], references: [id], onDelete: SetNull)
+  toCashier    Employee?               @relation("SettlementToCashier", fields: [toCashierId], references: [id], onDelete: SetNull)
+  floatAccount FloatAccount?           @relation(fields: [floatAccountId], references: [id], onDelete: SetNull)
+  lines        CashierSettlementLine[]
+  receipts     CashCollectionReceipt[]
+
+  @@index([companyId, branchId, outletId])
+  @@index([status])
+  @@index([docDate])
+  @@map("cashier_settlements")
+}
+
+model CashierSettlementLine {
+  id              Int     @id @default(autoincrement())
+  settlementId    Int
+  currencyId      Int
+  openingBalance  Decimal @default(0) @db.Decimal(18, 2)
+  collection      Decimal @default(0) @db.Decimal(18, 2)
+  cashOut         Decimal @default(0) @db.Decimal(18, 2)
+  closingBalance  Decimal @default(0) @db.Decimal(18, 2)
+  transferAmount  Decimal @default(0) @db.Decimal(18, 2)
+  exRate          Decimal @default(1) @db.Decimal(18, 6)
+  baseTransferAmt Decimal @default(0) @db.Decimal(18, 2)
+  denominations   Json?
+
+  settlement CashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  currency   Currency          @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([settlementId])
+  @@map("cashier_settlement_lines")
+}
+
+model CashCollectionReceipt {
+  id                Int       @id @default(autoincrement())
+  docNo             String    @unique @db.VarChar(60)
+  docDate           DateTime  @db.Date
+  receiptVoucherNo  String    @unique @db.VarChar(60)
+  receiptDate       DateTime  @db.Date
+  companyId         Int
+  branchId          Int
+  outletId          Int
+  settlementId      Int?
+  settledDocNo      String?   @db.VarChar(60)
+  settledDocDate    DateTime? @db.Date
+  receivedFromName  String    @db.VarChar(150)
+  receiptType       String    @default("Main Cash Collection") @db.VarChar(80)
+  collectionAccount String?   @db.VarChar(180)
+  bankAccountId     Int?
+  bankAccountName   String    @db.VarChar(180)
+  cashAccountName   String    @db.VarChar(180)
+  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
+  settlementBaseAmt Decimal   @default(0) @db.Decimal(18, 2)
+  receiptBaseAmt    Decimal   @default(0) @db.Decimal(18, 2)
+  differenceBaseAmt Decimal   @default(0) @db.Decimal(18, 2)
+  postedStatus      String    @default("Posted to Ledger") @db.VarChar(60)
+  postedById        Int?
+  postedByName      String?   @db.VarChar(150)
+  narration         String?   @db.Text
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  company     Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch      Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet      Outlet                      @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  settlement  CashierSettlement?          @relation(fields: [settlementId], references: [id], onDelete: SetNull)
+  bankAccount BankAccount?                @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  lines       CashCollectionReceiptLine[]
+
+  @@index([companyId, branchId, outletId])
+  @@index([receiptDate])
+  @@map("cash_collection_receipts")
+}
+
+model CashCollectionReceiptLine {
+  id               Int     @id @default(autoincrement())
+  receiptId        Int
+  currencyId       Int
+  settlementAmount Decimal @default(0) @db.Decimal(18, 2)
+  receiptAmount    Decimal @default(0) @db.Decimal(18, 2)
+  difference       Decimal @default(0) @db.Decimal(18, 2)
+  exRate           Decimal @default(1) @db.Decimal(18, 6)
+  remark           String? @db.VarChar(255)
+  denominations    Json?
+
+  receipt  CashCollectionReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  currency Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([receiptId])
+  @@map("cash_collection_receipt_lines")
+}
+
+model MainCashierPayment {
+  id                 Int      @id @default(autoincrement())
+  docNo              String   @unique @db.VarChar(60)
+  docDate            DateTime @db.Date
+  paymentVoucherNo   String   @unique @db.VarChar(60)
+  paymentDate        DateTime @db.Date
+  companyId          Int
+  branchId           Int
+  outletId           Int
+  currencyId         Int
+  vendorId           Int?
+  vendorName         String   @db.VarChar(150)
+  cashAdvanceType    String   @db.VarChar(80)
+  amount             Decimal  @db.Decimal(18, 2)
+  baseCurrencyCode   String   @default("USD") @db.VarChar(10)
+  baseAmount         Decimal  @default(0) @db.Decimal(18, 2)
+  departmentId       Int?
+  departmentName     String   @db.VarChar(150)
+  requesterId        Int?
+  requesterName      String   @db.VarChar(150)
+  floatAccountId     Int?
+  floatAccountName   String   @db.VarChar(180)
+  totalBalanceInHand Decimal  @default(0) @db.Decimal(18, 2)
+  balanceCurrency    String   @default("USD") @db.VarChar(10)
+  approvalStatus     String   @default("Submitted") @db.VarChar(40)
+  approvedByName     String?  @db.VarChar(150)
+  receiptNumber      String?  @db.VarChar(80)
+  narration          String?  @db.Text
+  denominations      Json?
+  createdById        Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet       Outlet        @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  currency     Currency      @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  vendor       Vendor?       @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  department   Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  requester    Employee?     @relation(fields: [requesterId], references: [id], onDelete: SetNull)
+  floatAccount FloatAccount? @relation(fields: [floatAccountId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, branchId, outletId])
+  @@index([paymentDate])
+  @@map("main_cashier_payments")
+}
+
+model MainCashierSettlement {
+  id                  Int      @id @default(autoincrement())
+  docNo               String   @unique @db.VarChar(60)
+  docDate             DateTime @db.Date
+  fromDate            DateTime @db.Date
+  toDate              DateTime @db.Date
+  companyId           Int
+  branchId            Int
+  outletId            Int
+  fromCashierId       Int?
+  fromCashierName     String   @db.VarChar(150)
+  toBankAccountId     Int?
+  toBankName          String   @db.VarChar(180)
+  primaryCurrencyCode String   @default("USD") @db.VarChar(10)
+  baseCurrencyCode    String   @default("USD") @db.VarChar(10)
+  totalTransferBase   Decimal  @default(0) @db.Decimal(18, 2)
+  narration           String?  @db.Text
+  status              String   @default("Submitted") @db.VarChar(40)
+  createdById         Int?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  company       Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch        Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet        Outlet                      @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  fromCashier   Employee?                   @relation(fields: [fromCashierId], references: [id], onDelete: SetNull)
+  toBankAccount BankAccount?                @relation(fields: [toBankAccountId], references: [id], onDelete: SetNull)
+  lines         MainCashierSettlementLine[]
+
+  @@index([companyId, branchId, outletId])
+  @@index([docDate])
+  @@map("main_cashier_settlements")
+}
+
+model MainCashierSettlementLine {
+  id              Int     @id @default(autoincrement())
+  settlementId    Int
+  currencyId      Int
+  openingBalance  Decimal @default(0) @db.Decimal(18, 2)
+  collection      Decimal @default(0) @db.Decimal(18, 2)
+  cashOut         Decimal @default(0) @db.Decimal(18, 2)
+  closingBalance  Decimal @default(0) @db.Decimal(18, 2)
+  transferAmount  Decimal @default(0) @db.Decimal(18, 2)
+  exRate          Decimal @default(1) @db.Decimal(18, 6)
+  baseTransferAmt Decimal @default(0) @db.Decimal(18, 2)
+  denominations   Json?
+
+  settlement MainCashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  currency   Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([settlementId])
+  @@map("main_cashier_settlement_lines")
+}
+
+model OutletBankDeposit {
+  id                    Int      @id @default(autoincrement())
+  docNo                 String   @unique @db.VarChar(60)
+  docDate               DateTime @db.Date
+  fromDate              DateTime @db.Date
+  toDate                DateTime @db.Date
+  depositDate           DateTime @db.Date
+  companyId             Int
+  branchId              Int
+  outletId              Int?
+  depositBankRefNo      String   @db.VarChar(100)
+  currencyId            Int
+  bankAccountId         Int?
+  depositAccountName    String   @db.VarChar(200)
+  processFlowDecision   String   @db.VarChar(30)
+  totalCollectionAmount Decimal  @default(0) @db.Decimal(18, 2)
+  settledAmount         Decimal  @default(0) @db.Decimal(18, 2)
+  balance               Decimal  @default(0) @db.Decimal(18, 2)
+  glAccounting          Json?
+  status                String   @default("Completed Deposit") @db.VarChar(50)
+  remark                String?  @db.Text
+  createdById           Int?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  company         Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch          Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet          Outlet?                 @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  currency        Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  bankAccount     BankAccount?            @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  collectionItems OutletBankDepositItem[]
+  reconciliations BankReconciliation[]
+
+  @@index([companyId, branchId])
+  @@index([depositDate])
+  @@map("outlet_bank_deposits")
+}
+
+model OutletBankDepositItem {
+  id               Int      @id @default(autoincrement())
+  bankDepositId    Int
+  cashDepositId    Int?
+  collectionDocNo  String   @db.VarChar(60)
+  collectionDate   DateTime @db.Date
+  collectionAmount Decimal  @db.Decimal(18, 2)
+  settledAmount    Decimal  @db.Decimal(18, 2)
+  balance          Decimal  @default(0) @db.Decimal(18, 2)
+
+  bankDeposit OutletBankDeposit @relation(fields: [bankDepositId], references: [id], onDelete: Cascade)
+  cashDeposit CashDeposit?      @relation(fields: [cashDepositId], references: [id], onDelete: SetNull)
+
+  @@index([bankDepositId])
+  @@map("outlet_bank_deposit_items")
+}
+
+model BankReconciliation {
+  id               Int       @id @default(autoincrement())
+  docCode          String    @unique @db.VarChar(60)
+  companyId        Int
+  branchId         Int
+  outletId         Int
+  bankDepositId    Int?
+  depositBankRefNo String    @db.VarChar(100)
+  depositDate      DateTime  @db.Date
+  settledAmount    Decimal   @db.Decimal(18, 2)
+  currencyId       Int
+  depositBankName  String    @db.VarChar(150)
+  statementDate    DateTime? @db.Date
+  statementRef     String?   @db.VarChar(100)
+  statementAmount  Decimal   @default(0) @db.Decimal(18, 2)
+  variance         Decimal   @default(0) @db.Decimal(18, 2)
+  status           String    @default("Pending") @db.VarChar(50)
+  matchingMethod   String    @default("Direct Statement Import") @db.VarChar(100)
+  reconciledById   Int?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  company     Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch      Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet      Outlet             @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  bankDeposit OutletBankDeposit? @relation(fields: [bankDepositId], references: [id], onDelete: SetNull)
+  currency    Currency           @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, outletId])
+  @@index([depositBankRefNo])
+  @@map("bank_reconciliations")
+}
+
+// ============================================================================
+// 4. PROCESS 02: PETTY CASH MANAGEMENT & IOU AGING
+// ============================================================================
+
+model PettyCashRequest {
+  id                Int       @id @default(autoincrement())
+  requestId         String    @unique @db.VarChar(60)
+  requestDate       DateTime  @db.Date
+  companyId         Int
+  branchId          Int
+  outletId          Int?
+  departmentId      Int
+  requestedById     Int
+  requesterTitle    String?   @db.VarChar(200)
+  expenseCategoryId Int
+  currencyId        Int
+  requestAmount     Decimal   @db.Decimal(18, 2)
+  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
+  baseAmount        Decimal   @default(0) @db.Decimal(18, 2)
+  approvedAmount    Decimal?  @db.Decimal(18, 2)
+  paidAmount        Decimal   @default(0) @db.Decimal(18, 2)
+  settledAmount     Decimal   @default(0) @db.Decimal(18, 2)
+  refundAmount      Decimal   @default(0) @db.Decimal(18, 2)
+  settledDate       DateTime? @db.Date
+  refundDate        DateTime? @db.Date
+  purpose           String    @db.Text
+  remark            String?   @db.Text
+  status            String    @default("Draft") @db.VarChar(40)
+  approvedById      Int?
+  approvedByName    String?   @db.VarChar(150)
+  approvedDate      DateTime? @db.Date
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  company         Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch          Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet          Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  department      Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  requestedBy     Employee                  @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+  expenseCategory ExpenseCategory           @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+  currency        Currency                  @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  advances        PettyCashAdvance[]
+  billSubmissions PettyCashBillSubmission[]
+  returns         PettyCashReturn[]
+
+  @@index([companyId, branchId])
+  @@index([departmentId])
+  @@index([status])
+  @@index([requestDate])
+  @@map("petty_cash_requests")
+}
+
+model PettyCashAdvance {
+  id                Int       @id @default(autoincrement())
+  docNo             String    @unique @db.VarChar(60)
+  docDate           DateTime  @db.Date
+  requestId         Int?
+  requestRefLabel   String?   @db.VarChar(100)
+  companyId         Int
+  branchId          Int
+  outletId          Int?
+  departmentId      Int?
+  departmentName    String    @db.VarChar(150)
+  expenseCategoryId Int?
+  expenseCategory   String    @db.VarChar(150)
+  requesterId       Int?
+  requesterName     String    @db.VarChar(150)
+  employeeNo        String    @db.VarChar(50)
+  requestedAmount   Decimal   @db.Decimal(18, 2)
+  approvedAmount    Decimal   @db.Decimal(18, 2)
+  amountPaid        Decimal   @db.Decimal(18, 2)
+  settledAmount     Decimal   @default(0) @db.Decimal(18, 2)
+  refundAmount      Decimal   @default(0) @db.Decimal(18, 2)
+  refundDate        DateTime? @db.Date
+  balanceDue        Decimal   @default(0) @db.Decimal(18, 2)
+  paymentType       String    @default("Cash Handover") @db.VarChar(50)
+  floatAccountId    Int?
+  bankOrCashAccount String    @db.VarChar(200)
+  currencyId        Int
+  exRate            Decimal   @default(1) @db.Decimal(18, 6)
+  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
+  baseAmountPaid    Decimal   @default(0) @db.Decimal(18, 2)
+  amountInWords     String?   @db.VarChar(255)
+  narration         String?   @db.Text
+  settledStatus     String    @default("Unsettled (Active Advance)") @db.VarChar(80)
+  status            String    @default("Paid") @db.VarChar(40)
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  request         PettyCashRequest?         @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  company         Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch          Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet          Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  department      Department?               @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  expenseCat      ExpenseCategory?          @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
+  requester       Employee?                 @relation(fields: [requesterId], references: [id], onDelete: SetNull)
+  floatAccount    FloatAccount?             @relation(fields: [floatAccountId], references: [id], onDelete: SetNull)
+  currency        Currency                  @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  billSubmissions PettyCashBillSubmission[]
+  returns         PettyCashReturn[]
+  iouEntry        PettyCashIOU?
+
+  @@index([companyId, branchId])
+  @@index([requestId])
+  @@index([status])
+  @@index([docDate])
+  @@map("petty_cash_advances")
+}
+
+model PettyCashBillSubmission {
+  id                  Int       @id @default(autoincrement())
+  docNo               String    @unique @db.VarChar(60)
+  docDate             DateTime  @db.Date
+  companyId           Int
+  branchId            Int
+  outletId            Int?
+  departmentId        Int?
+  departmentName      String    @db.VarChar(150)
+  employeeId          Int?
+  employeeName        String    @db.VarChar(150)
+  employeeNo          String    @db.VarChar(50)
+  submissionType      String    @default("Advance Settlement Direct") @db.VarChar(60)
+  requestId           Int?
+  advanceId           Int?
+  baseCurrencyCode    String    @default("USD") @db.VarChar(10)
+  totalAdvanceBalance Decimal   @default(0) @db.Decimal(18, 2)
+  totalBillAmount     Decimal   @default(0) @db.Decimal(18, 2)
+  taxTotal            Decimal   @default(0) @db.Decimal(18, 2)
+  balanceToReturn     Decimal   @default(0) @db.Decimal(18, 2)
+  dueDays             Int       @default(0)
+  cashierNotified     Boolean   @default(false)
+  approverAction      String    @default("Pending Verification") @db.VarChar(60)
+  approverRemark      String?   @db.Text
+  status              String    @default("Pending Verification") @db.VarChar(50)
+  verifiedById        Int?
+  verifiedAt          DateTime?
+  createdById         Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  company      Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch       Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet       Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  department   Department?               @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  employee     Employee?                 @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  request      PettyCashRequest?         @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  advance      PettyCashAdvance?         @relation(fields: [advanceId], references: [id], onDelete: SetNull)
+  lines        PettyCashBillLine[]
+  adjustments  PettyCashBillAdjustment[]
+  returns      PettyCashReturn[]
+  reimbItems   FloatReimbursementVoucher[]
+
+  @@index([companyId, branchId])
+  @@index([advanceId])
+  @@index([status])
+  @@map("petty_cash_bill_submissions")
+}
+
+model PettyCashBillLine {
+  id                  Int      @id @default(autoincrement())
+  billSubmissionId    Int
+  billDate            DateTime @db.Date
+  billNo              String   @db.VarChar(80)
+  supplierName        String   @db.VarChar(150)
+  vendorId            Int?
+  expenseCategoryId   Int?
+  expenseCategoryName String   @db.VarChar(150)
+  location            String?  @db.VarChar(150)
+  description         String   @db.Text
+  currencyId          Int
+  amount              Decimal  @db.Decimal(18, 2)
+  exRate              Decimal  @default(1) @db.Decimal(18, 6)
+  baseAmount          Decimal  @default(0) @db.Decimal(18, 2)
+  taxRate             Decimal  @default(8) @db.Decimal(5, 2)
+  taxAmount           Decimal  @default(0) @db.Decimal(18, 2)
+  attachmentName      String?  @db.VarChar(255)
+
+  billSubmission  PettyCashBillSubmission @relation(fields: [billSubmissionId], references: [id], onDelete: Cascade)
+  vendor          Vendor?                 @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  expenseCategory ExpenseCategory?        @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
+  currency        Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([billSubmissionId])
+  @@map("petty_cash_bill_lines")
+}
+
+model PettyCashBillAdjustment {
+  id                  Int       @id @default(autoincrement())
+  billSubmissionId    Int
+  paymentNo           String    @db.VarChar(60)
+  paymentDate         DateTime? @db.Date
+  balanceAmount       Decimal   @default(0) @db.Decimal(18, 2)
+  adjustedAmount      Decimal   @default(0) @db.Decimal(18, 2)
+  adjustedAmountLocal Decimal   @default(0) @db.Decimal(18, 2)
+  localCurrencyCode   String    @default("MVR") @db.VarChar(10)
+  remark              String?   @db.VarChar(255)
+
+  billSubmission PettyCashBillSubmission @relation(fields: [billSubmissionId], references: [id], onDelete: Cascade)
+
+  @@index([billSubmissionId])
+  @@map("petty_cash_bill_adjustments")
+}
+
+model PettyCashReturn {
+  id                Int      @id @default(autoincrement())
+  docNo             String   @unique @db.VarChar(60)
+  docDate           DateTime @db.Date
+  companyId         Int
+  branchId          Int
+  outletId          Int?
+  requestId         Int?
+  advanceId         Int?
+  billSubmissionId  Int?
+  departmentId      Int?
+  departmentName    String   @db.VarChar(150)
+  requesterName     String   @db.VarChar(150)
+  employeeNo        String   @db.VarChar(50)
+  receivedByName    String   @db.VarChar(150)
+  advanceAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  settledAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  balance           Decimal  @default(0) @db.Decimal(18, 2)
+  receiptType       String   @default("Cash") @db.VarChar(40)
+  bankOrCashAccount String   @db.VarChar(200)
+  returnAmount      Decimal  @db.Decimal(18, 2)
+  currencyId        Int
+  exRate            Decimal  @default(1) @db.Decimal(18, 6)
+  baseCurrencyCode  String   @default("USD") @db.VarChar(10)
+  baseReturnAmount  Decimal  @default(0) @db.Decimal(18, 2)
+  amountInWords     String?  @db.VarChar(255)
+  narration         String?  @db.Text
+  status            String   @default("Receipt Issued & Settled") @db.VarChar(60)
+  createdById       Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company        Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch         Branch                   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet         Outlet?                  @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  request        PettyCashRequest?        @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  advance        PettyCashAdvance?        @relation(fields: [advanceId], references: [id], onDelete: SetNull)
+  billSubmission PettyCashBillSubmission? @relation(fields: [billSubmissionId], references: [id], onDelete: SetNull)
+  department     Department?              @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  currency       Currency                 @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId])
+  @@index([advanceId])
+  @@map("petty_cash_returns")
+}
+
+model FloatReimbursement {
+  id                Int      @id @default(autoincrement())
+  docNo             String   @unique @db.VarChar(60)
+  docDate           DateTime @db.Date
+  fromDate          DateTime @db.Date
+  toDate            DateTime @db.Date
+  companyId         Int
+  branchId          Int
+  outletId          Int?
+  locationName      String?  @db.VarChar(150)
+  floatAccountId    Int?
+  floatAccountName  String   @db.VarChar(200)
+  baseCurrencyCode  String   @default("USD") @db.VarChar(10)
+  floatAmount       Decimal  @default(0) @db.Decimal(18, 2)
+  reimburseAmount   Decimal  @default(0) @db.Decimal(18, 2)
+  settledAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  balanceCashInHand Decimal  @default(0) @db.Decimal(18, 2)
+  narration         String?  @db.Text
+  status            String   @default("Draft") @db.VarChar(60)
+  createdById       Int?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company      Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch       Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet       Outlet?                     @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  floatAccount FloatAccount?               @relation(fields: [floatAccountId], references: [id], onDelete: SetNull)
+  vouchers     FloatReimbursementVoucher[]
+
+  @@index([companyId, branchId])
+  @@index([status])
+  @@map("float_reimbursements")
+}
+
+model FloatReimbursementVoucher {
+  id                  Int     @id @default(autoincrement())
+  reimbursementId     Int
+  billSubmissionId    Int?
+  requestRef          String? @db.VarChar(60)
+  voucherNo           String  @db.VarChar(60)
+  voucherDate         String  @db.VarChar(40)
+  employeeName        String  @db.VarChar(150)
+  expenseCategoryName String  @db.VarChar(150)
+  remark              String? @db.VarChar(255)
+  amount              Decimal @db.Decimal(18, 2)
+  runningTotal        Decimal @db.Decimal(18, 2)
+
+  reimbursement  FloatReimbursement       @relation(fields: [reimbursementId], references: [id], onDelete: Cascade)
+  billSubmission PettyCashBillSubmission? @relation(fields: [billSubmissionId], references: [id], onDelete: SetNull)
+
+  @@index([reimbursementId])
+  @@map("float_reimbursement_vouchers")
+}
+
+model PettyCashIOU {
+  id                Int      @id @default(autoincrement())
+  docId             String   @unique @db.VarChar(60)
+  docDate           DateTime @db.Date
+  advanceId         Int?     @unique
+  employeeId        Int?
+  employeeName      String   @db.VarChar(150)
+  employeeNo        String   @db.VarChar(50)
+  departmentName    String?  @db.VarChar(150)
+  purpose           String?  @db.VarChar(255)
+  baseCurrencyCode  String   @default("USD") @db.VarChar(10)
+  advAmount         Decimal  @default(0) @db.Decimal(18, 2)
+  settledAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  settledVfApproved String   @default("Pending Verification") @db.VarChar(60)
+  returnAmount      Decimal  @default(0) @db.Decimal(18, 2)
+  pendingAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  status            String   @default("Active Advance") @db.VarChar(60)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  advance  PettyCashAdvance? @relation(fields: [advanceId], references: [id], onDelete: SetNull)
+  employee Employee?         @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+
+  @@index([employeeId])
+  @@index([status])
+  @@map("petty_cash_ious")
+}
+
+// ============================================================================
+// 5. PROCESS 03: SALES DAY-END RECONCILIATION & PERIOD LOCK
+// ============================================================================
+
+model SalesReconciliation {
+  id                  Int       @id @default(autoincrement())
+  docNo               String    @unique @db.VarChar(60)
+  docDate             DateTime  @db.Date
+  companyId           Int
+  branchId            Int
+  outletId            Int
+  shiftId             Int?
+  cashierId           Int?
+  shiftStatus         String    @default("Closed") @db.VarChar(40)
+  baseCurrencyCode    String    @default("USD") @db.VarChar(10)
+  posGrossSales       Decimal   @default(0) @db.Decimal(18, 2)
+  returnsAmount       Decimal   @default(0) @db.Decimal(18, 2)
+  netSales            Decimal   @default(0) @db.Decimal(18, 2)
+  totalCollectionBase Decimal   @default(0) @db.Decimal(18, 2)
+  varianceAmount      Decimal   @default(0) @db.Decimal(18, 2)
+  varianceStatus      String    @default("Matched (Zero Variance)") @db.VarChar(100)
+  rootCauseCategory   String?   @db.VarChar(120)
+  overrideReason      String?   @db.Text
+  isPeriodLocked      Boolean   @default(false)
+  lockedById          Int?
+  lockedAt            DateTime?
+  unblockedById       Int?
+  unblockedAt         DateTime?
+  unblockReason       String?   @db.Text
+  status              String    @default("Draft") @db.VarChar(40)
+  remark              String?   @db.Text
+  approverName        String?   @db.VarChar(150)
+  approverRemarks     String?   @db.Text
+  approvedById        Int?
+  approvedAt          DateTime?
+  linkedCashDepositId Int?
+  createdById         Int?
+  updatedById         Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  company           Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch            Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet            Outlet                    @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  shift             Shift?                    @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  cashier           Employee?                 @relation(fields: [cashierId], references: [id], onDelete: SetNull)
+  linkedCashDeposit CashDeposit?              @relation(fields: [linkedCashDepositId], references: [id], onDelete: SetNull)
+  lines             SalesReconciliationLine[]
+  varianceIncidents VarianceIncident[]
+
+  @@index([companyId, branchId, outletId])
+  @@index([docDate])
+  @@index([status])
+  @@map("sales_reconciliations")
+}
+
+model SalesReconciliationLine {
+  id                      Int     @id @default(autoincrement())
+  reconciliationId        Int
+  shiftId                 Int?
+  shiftName               String  @db.VarChar(80)
+  cashierName             String  @db.VarChar(150)
+  shiftTotalSales         Decimal @default(0) @db.Decimal(18, 2)
+  bankOrSafe              String  @db.VarChar(120)
+  paymentTypeId           Int?
+  paymentTypeName         String  @db.VarChar(100)
+  subTypeName             String  @db.VarChar(120)
+  currencyId              Int
+  amount                  Decimal @default(0) @db.Decimal(18, 2)
+  exRate                  Decimal @default(1) @db.Decimal(18, 6)
+  baseAmount              Decimal @default(0) @db.Decimal(18, 2)
+  autoFilledFromDepositId Int?
+  diffType                String? @db.VarChar(60)
+  remarks                 String? @db.VarChar(255)
+
+  reconciliation        SalesReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  shift                 Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  paymentType           PaymentType?        @relation(fields: [paymentTypeId], references: [id], onDelete: SetNull)
+  currency              Currency            @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  autoFilledFromDeposit CashDeposit?        @relation(fields: [autoFilledFromDepositId], references: [id], onDelete: SetNull)
+
+  @@index([reconciliationId])
+  @@map("sales_reconciliation_lines")
+}
+
+model VarianceIncident {
+  id                 Int      @id @default(autoincrement())
+  incidentCode       String   @unique @db.VarChar(60)
+  reconciliationId   Int?
+  incidentDate       DateTime @db.Date
+  shiftTime          String   @db.VarChar(80)
+  companyId          Int
+  branchId           Int
+  outletId           Int
+  cashierId          Int?
+  cashierName        String   @db.VarChar(150)
+  type               String   @db.VarChar(20)
+  posExpectedAmount  Decimal  @db.Decimal(18, 2)
+  actualCountAmount  Decimal  @db.Decimal(18, 2)
+  varianceAmount     Decimal  @db.Decimal(18, 2)
+  rootCause          String   @db.VarChar(200)
+  cashierExplanation String?  @db.Text
+  checkerAction      String?  @db.Text
+  recoveryMode       String?  @db.VarChar(80)
+  auditStatus        String   @default("Investigating") @db.VarChar(50)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  reconciliation SalesReconciliation? @relation(fields: [reconciliationId], references: [id], onDelete: SetNull)
+  company        Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch         Branch               @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet         Outlet               @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  cashier        Employee?            @relation(fields: [cashierId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, outletId])
+  @@index([incidentDate])
+  @@index([type])
+  @@map("variance_incidents")
+}
+
+// ============================================================================
+// 6. PROCESS 04: MULTI-STAGE APPROVAL WORKFLOW ENGINE
+// ============================================================================
+
+model ApprovalStage {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  noOfApproval Int      @default(1)
+  noOfReject   Int      @default(1)
+  description  String?  @db.Text
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  approvers      ApprovalStageApprover[]
+  templateStages ApprovalTemplateStage[]
+  decisions      ApprovalDecision[]
+
+  @@map("approval_stages")
+}
+
+model ApprovalStageApprover {
+  id           Int     @id @default(autoincrement())
+  stageId      Int
+  userId       Int
+  maxLimitBase Decimal @default(10000) @db.Decimal(18, 2)
+
+  stage ApprovalStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([stageId, userId])
+  @@index([stageId])
+  @@map("approval_stage_approvers")
+}
+
+model ApprovalTemplate {
+  id                Int      @id @default(autoincrement())
+  code              String   @unique @db.VarChar(50)
+  name              String   @db.VarChar(150)
+  description       String?  @db.Text
+  governedDocuments String[] @default([])
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  stages      ApprovalTemplateStage[]
+  originators ApprovalTemplateOriginator[]
+  terms       ApprovalTemplateTerm[]
+  instances   ApprovalInstance[]
+
+  @@map("approval_templates")
+}
+
+model ApprovalTemplateStage {
+  id         Int @id @default(autoincrement())
+  templateId Int
+  stageId    Int
+  stageOrder Int
+
+  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  stage    ApprovalStage    @relation(fields: [stageId], references: [id], onDelete: Restrict)
+
+  @@unique([templateId, stageOrder])
+  @@index([templateId])
+  @@map("approval_template_stages")
+}
+
+model ApprovalTemplateOriginator {
+  id         Int @id @default(autoincrement())
+  templateId Int
+  userId     Int
+
+  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, userId])
+  @@map("approval_template_originators")
+}
+
+model ApprovalTemplateTerm {
+  id          Int     @id @default(autoincrement())
+  templateId  Int
+  field       String  @db.VarChar(100)
+  operator    String  @db.VarChar(20)
+  value       String  @db.VarChar(120)
+  description String? @db.VarChar(255)
+
+  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@index([templateId])
+  @@map("approval_template_terms")
+}
+
+model ApprovalInstance {
+  id                Int       @id @default(autoincrement())
+  templateId        Int?
+  entityType        String    @db.VarChar(60)
+  entityId          Int
+  docNo             String    @db.VarChar(80)
+  title             String    @db.VarChar(255)
+  companyId         Int
+  branchId          Int?
+  outletId          Int?
+  submittedById     Int
+  amountBase        Decimal   @default(0) @db.Decimal(18, 2)
+  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
+  triggerSummary    String?   @db.VarChar(255)
+  currentStageOrder Int       @default(1)
+  totalStages       Int       @default(1)
+  status            String    @default("Pending") @db.VarChar(40)
+  completedAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  template    ApprovalTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  submittedBy User               @relation("ApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Restrict)
+  decisions   ApprovalDecision[]
+
+  @@index([entityType, entityId])
+  @@index([status])
+  @@index([companyId, outletId])
+  @@map("approval_instances")
+}
+
+model ApprovalDecision {
+  id          Int      @id @default(autoincrement())
+  instanceId  Int
+  stageId     Int?
+  stageOrder  Int
+  decidedById Int
+  decision    String   @db.VarChar(30)
+  comment     String?  @db.Text
+  decidedAt   DateTime @default(now())
+
+  instance  ApprovalInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  stage     ApprovalStage?   @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  decidedBy User             @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+
+  @@index([instanceId])
+  @@map("approval_decisions")
+}
