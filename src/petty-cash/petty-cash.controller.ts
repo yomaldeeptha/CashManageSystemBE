@@ -77,6 +77,17 @@ export class PettyCashController {
     return this.service.rejectRequest(user, id, body);
   }
 
+  @Post('requests/:id/cancel')
+  @RequirePermission('pettyCash', 'update')
+  @ApiOperation({ summary: 'Cancel a Petty Cash Request with mandatory audit trail' })
+  cancelRequest(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body?: { reason?: string },
+  ) {
+    return this.service.cancelRequest(user, id, body?.reason);
+  }
+
   // ---- P2: Advances ----
   @Get('advances')
   @RequirePermission('pettyCash', 'read')

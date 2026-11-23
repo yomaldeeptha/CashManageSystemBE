@@ -3,11 +3,13 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
@@ -36,7 +38,8 @@ export class SalesReconService {
     private readonly approvalsService: ApprovalsService,
     private readonly fxResolver: ExchangeRateResolverService,
     private readonly numberSeries: NumberSeriesGeneratorService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   private computeVarianceStatus(variance: Decimal, symbol: string): string {
     if (variance.abs().lt(0.01)) {
@@ -267,6 +270,7 @@ export class SalesReconService {
       let docNo = dto.docNo || '';
 
       if (editId) {
+        const oldRecon = await tx.salesReconciliation.findUnique({ where: { id: editId } });
         const updated = await tx.salesReconciliation.update({
           where: { id: editId },
           data: {
@@ -290,21 +294,33 @@ export class SalesReconService {
             status: nextStatus,
             remark: dto.remark || '',
             updatedById: user.id,
+            updateUserId: user.id,
           },
         });
         docNo = updated.docNo;
         if (dto.lines) {
           await tx.salesReconciliationLine.deleteMany({ where: { reconciliationId: editId } });
         }
+        if (this.changeLogService && oldRecon) {
+          await this.changeLogService.logUpdate({
+            tableName: 'SalesReconciliation',
+            recordId: updated.id,
+            recordCode: updated.docNo,
+            oldValues: oldRecon,
+            newValues: updated,
+            actor: user,
+            tx,
+          });
+        }
       } else {
         docNo =
           dto.docNo && !(await tx.salesReconciliation.findUnique({ where: { docNo: dto.docNo } }))
             ? dto.docNo
             : await this.numberSeries.allocateNextNumber('FRM-SREC-DAYEND', {
-                branchId: scope.branchId,
-                tx,
-                fallbackPrefix: 'SREC-2026-',
-              });
+              branchId: scope.branchId,
+              tx,
+              fallbackPrefix: 'SREC-2026-',
+            });
         const created = await tx.salesReconciliation.create({
           data: {
             docNo,
@@ -329,9 +345,21 @@ export class SalesReconService {
             remark: dto.remark || '',
             createdById: user.id,
             updatedById: user.id,
+            createUserId: user.id,
+            updateUserId: user.id,
           },
         });
         reconId = created.id;
+        if (this.changeLogService) {
+          await this.changeLogService.logCreate({
+            tableName: 'SalesReconciliation',
+            recordId: created.id,
+            recordCode: created.docNo,
+            newValues: created,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       if (preparedLines.length > 0) {
@@ -351,6 +379,8 @@ export class SalesReconService {
             baseAmount: toPrismaDecimal(l.baseAmount),
             diffType: l.diffType,
             remarks: l.remarks,
+            createUserId: user.id,
+            updateUserId: user.id,
           })),
         });
       }
@@ -362,7 +392,7 @@ export class SalesReconService {
         });
         if (!existingIncident) {
           const cnt = await tx.varianceIncident.count();
-          await tx.varianceIncident.create({
+          const inc = await tx.varianceIncident.create({
             data: {
               incidentCode: `VAR-2026-${String(cnt + 1).padStart(3, '0')}`,
               reconciliationId: reconId!,
@@ -380,8 +410,20 @@ export class SalesReconService {
               rootCause: dto.rootCauseCategory || 'Reconciliation Discrepancy Pending Review',
               cashierExplanation: dto.remark || dto.overrideReason || '',
               auditStatus: 'Investigating',
+              createUserId: user.id,
+              updateUserId: user.id,
             },
           });
+          if (this.changeLogService) {
+            await this.changeLogService.logCreate({
+              tableName: 'VarianceIncident',
+              recordId: inc.id,
+              recordCode: inc.incidentCode,
+              newValues: inc,
+              actor: user,
+              tx,
+            });
+          }
         }
       }
 
@@ -494,15 +536,30 @@ export class SalesReconService {
       const totalColl = updatedLines.reduce((s, l) => s.plus(toDecimal(l.baseAmount)), new Decimal(0));
       const variance = roundMoney(totalColl.minus(toDecimal(recon.netSales)));
 
-      await tx.salesReconciliation.update({
+      const updatedRecon = await tx.salesReconciliation.update({
         where: { id: reconId },
         data: {
           linkedCashDepositId: dep.id,
           totalCollectionBase: toPrismaDecimal(totalColl),
           varianceAmount: toPrismaDecimal(variance),
           varianceStatus: this.computeVarianceStatus(variance, baseInfo.symbol),
+          updateUserId: user.id,
+          updatedById: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'SalesReconciliation',
+          recordId: reconId,
+          recordCode: recon.docNo,
+          oldValues: recon,
+          newValues: updatedRecon,
+          description: `Synced physical cash from Process 01 ${dep.docNo} (${dep.envelopeNo})`,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'sales_reconciliation',
@@ -533,7 +590,7 @@ export class SalesReconService {
     await this.prisma.$transaction(async (tx) => {
       for (const r of candidates) {
         if (toDecimal(r.varianceAmount).abs().lt(0.01)) {
-          await tx.salesReconciliation.update({
+          const next = await tx.salesReconciliation.update({
             where: { id: r.id },
             data: {
               status: 'Approved',
@@ -541,8 +598,23 @@ export class SalesReconService {
               approvedById: user.id,
               approverName: user.fullName,
               approvedAt: new Date(),
+              updateUserId: user.id,
+              updatedById: user.id,
             },
           });
+          if (this.changeLogService) {
+            await this.changeLogService.logAction({
+              action: 'APPROVE',
+              tableName: 'SalesReconciliation',
+              recordId: r.id,
+              recordCode: r.docNo,
+              oldValues: r,
+              newValues: next,
+              description: 'Auto-reconciled zero-variance shift close',
+              actor: user,
+              tx,
+            });
+          }
           await this.auditService.log({
             entityType: 'sales_reconciliation',
             entityId: r.id,
@@ -610,15 +682,30 @@ export class SalesReconService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.salesReconciliation.update({
+      const next = await tx.salesReconciliation.update({
         where: { id },
         data: {
           isPeriodLocked: true,
           status: 'Locked',
           lockedById: user.id,
           lockedAt: new Date(),
+          updateUserId: user.id,
+          updatedById: user.id,
         },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'CLOSE',
+          tableName: 'SalesReconciliation',
+          recordId: id,
+          recordCode: recon.docNo,
+          oldValues: recon,
+          newValues: next,
+          description: `Enforced End-of-Day Period Lock on ${recon.docNo}`,
+          actor: user,
+          tx,
+        });
+      }
       await this.auditService.log({
         entityType: 'sales_reconciliation',
         entityId: id,
@@ -645,7 +732,7 @@ export class SalesReconService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.salesReconciliation.update({
+      const next = await tx.salesReconciliation.update({
         where: { id },
         data: {
           isPeriodLocked: false,
@@ -653,8 +740,23 @@ export class SalesReconService {
           unblockedById: user.id,
           unblockedAt: new Date(),
           unblockReason: dto.reason.trim(),
+          updateUserId: user.id,
+          updatedById: user.id,
         },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'REOPEN',
+          tableName: 'SalesReconciliation',
+          recordId: id,
+          recordCode: recon.docNo,
+          oldValues: recon,
+          newValues: next,
+          description: `Unblocked locked period ${recon.docNo}: ${dto.reason.trim()}`,
+          actor: user,
+          tx,
+        });
+      }
       await this.auditService.log({
         entityType: 'sales_reconciliation',
         entityId: id,

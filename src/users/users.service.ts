@@ -2,11 +2,13 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import {
   CreateUserDto,
@@ -38,6 +40,7 @@ export class UsersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   private serializeUser(
@@ -192,30 +195,52 @@ export class UsersService {
           isConfirmEmail: dto.isConfirmEmail ?? true,
           navMenuMode: dto.navMenuMode || 'both',
           docSectionMode: dto.docSectionMode || 'boxes',
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
       });
 
       if (companyIds.length > 0) {
         await tx.userCompanyAccess.createMany({
-          data: companyIds.map((companyId) => ({ userId: user.id, companyId })),
+          data: companyIds.map((companyId) => ({
+            userId: user.id,
+            companyId,
+            createUserId: actor.id,
+            updateUserId: actor.id,
+          })),
           skipDuplicates: true,
         });
       }
       if (branchIds.length > 0) {
         await tx.userBranchAccess.createMany({
-          data: branchIds.map((branchId) => ({ userId: user.id, branchId })),
+          data: branchIds.map((branchId) => ({
+            userId: user.id,
+            branchId,
+            createUserId: actor.id,
+            updateUserId: actor.id,
+          })),
           skipDuplicates: true,
         });
       }
       if (outletIds.length > 0) {
         await tx.userOutletAccess.createMany({
-          data: outletIds.map((outletId) => ({ userId: user.id, outletId })),
+          data: outletIds.map((outletId) => ({
+            userId: user.id,
+            outletId,
+            createUserId: actor.id,
+            updateUserId: actor.id,
+          })),
           skipDuplicates: true,
         });
       }
       if (departmentIds.length > 0) {
         await tx.userDepartmentAccess.createMany({
-          data: departmentIds.map((departmentId) => ({ userId: user.id, departmentId })),
+          data: departmentIds.map((departmentId) => ({
+            userId: user.id,
+            departmentId,
+            createUserId: actor.id,
+            updateUserId: actor.id,
+          })),
           skipDuplicates: true,
         });
       }
@@ -225,6 +250,8 @@ export class UsersService {
             userId: user.id,
             menuId: a.menuId,
             authLevel: a.auth,
+            createUserId: actor.id,
+            updateUserId: actor.id,
           })),
           skipDuplicates: true,
         });
@@ -272,6 +299,17 @@ export class UsersService {
         }
       }
 
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'User',
+          recordId: user.id,
+          recordCode: user.username,
+          newValues: { ...user, companyIds, branchIds, outletIds, departmentIds },
+          actor,
+          tx,
+        });
+      }
+
       await this.auditService.log({
         entityType: 'user',
         entityId: user.id,
@@ -308,7 +346,7 @@ export class UsersService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.user.update({
+      const updatedUser = await tx.user.update({
         where: { id },
         data: {
           ...(dto.fullName !== undefined ? { fullName: dto.fullName.trim() } : {}),
@@ -324,6 +362,7 @@ export class UsersService {
           ...(dto.isConfirmEmail !== undefined ? { isConfirmEmail: dto.isConfirmEmail } : {}),
           ...(dto.navMenuMode !== undefined ? { navMenuMode: dto.navMenuMode } : {}),
           ...(dto.docSectionMode !== undefined ? { docSectionMode: dto.docSectionMode } : {}),
+          updateUserId: actor.id,
         },
       });
 
@@ -332,7 +371,7 @@ export class UsersService {
         await tx.userCompanyAccess.deleteMany({ where: { userId: id } });
         if (ids.length > 0) {
           await tx.userCompanyAccess.createMany({
-            data: ids.map((companyId) => ({ userId: id, companyId })),
+            data: ids.map((companyId) => ({ userId: id, companyId, createUserId: actor.id, updateUserId: actor.id })),
             skipDuplicates: true,
           });
         }
@@ -342,7 +381,7 @@ export class UsersService {
         await tx.userBranchAccess.deleteMany({ where: { userId: id } });
         if (ids.length > 0) {
           await tx.userBranchAccess.createMany({
-            data: ids.map((branchId) => ({ userId: id, branchId })),
+            data: ids.map((branchId) => ({ userId: id, branchId, createUserId: actor.id, updateUserId: actor.id })),
             skipDuplicates: true,
           });
         }
@@ -352,7 +391,7 @@ export class UsersService {
         await tx.userOutletAccess.deleteMany({ where: { userId: id } });
         if (ids.length > 0) {
           await tx.userOutletAccess.createMany({
-            data: ids.map((outletId) => ({ userId: id, outletId })),
+            data: ids.map((outletId) => ({ userId: id, outletId, createUserId: actor.id, updateUserId: actor.id })),
             skipDuplicates: true,
           });
         }
@@ -362,7 +401,7 @@ export class UsersService {
         await tx.userDepartmentAccess.deleteMany({ where: { userId: id } });
         if (ids.length > 0) {
           await tx.userDepartmentAccess.createMany({
-            data: ids.map((departmentId) => ({ userId: id, departmentId })),
+            data: ids.map((departmentId) => ({ userId: id, departmentId, createUserId: actor.id, updateUserId: actor.id })),
             skipDuplicates: true,
           });
         }
@@ -375,10 +414,24 @@ export class UsersService {
               userId: id,
               menuId: a.menuId,
               authLevel: a.auth,
+              createUserId: actor.id,
+              updateUserId: actor.id,
             })),
             skipDuplicates: true,
           });
         }
+      }
+
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'User',
+          recordId: id,
+          recordCode: updatedUser.username,
+          oldValues: existing,
+          newValues: updatedUser,
+          actor,
+          tx,
+        });
       }
 
       await this.auditService.log({
@@ -396,22 +449,38 @@ export class UsersService {
   }
 
   async updateMe(user: AuthenticatedUser, dto: UpdateProfileDto) {
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        ...(dto.fullName !== undefined ? { fullName: dto.fullName.trim() } : {}),
-        ...(dto.email !== undefined ? { email: dto.email.trim().toLowerCase() } : {}),
-        ...(dto.contactNo !== undefined ? { contactNo: dto.contactNo } : {}),
-        ...(dto.designation !== undefined ? { designation: dto.designation } : {}),
-        ...(dto.address !== undefined ? { address: dto.address } : {}),
-        ...(dto.remark !== undefined ? { remark: dto.remark } : {}),
-        ...(dto.navMenuMode !== undefined ? { navMenuMode: dto.navMenuMode } : {}),
-        ...(dto.docSectionMode !== undefined ? { docSectionMode: dto.docSectionMode } : {}),
-        ...(dto.twoFactorEnabled !== undefined ? { twoFactorEnabled: dto.twoFactorEnabled } : {}),
-        ...(dto.preferences !== undefined
-          ? { preferences: dto.preferences as Prisma.InputJsonValue }
-          : {}),
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({ where: { id: user.id } });
+      if (!existing) throw new NotFoundException(`User #${user.id} not found.`);
+      const updated = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          ...(dto.fullName !== undefined ? { fullName: dto.fullName.trim() } : {}),
+          ...(dto.email !== undefined ? { email: dto.email.trim().toLowerCase() } : {}),
+          ...(dto.contactNo !== undefined ? { contactNo: dto.contactNo } : {}),
+          ...(dto.designation !== undefined ? { designation: dto.designation } : {}),
+          ...(dto.address !== undefined ? { address: dto.address } : {}),
+          ...(dto.remark !== undefined ? { remark: dto.remark } : {}),
+          ...(dto.navMenuMode !== undefined ? { navMenuMode: dto.navMenuMode } : {}),
+          ...(dto.docSectionMode !== undefined ? { docSectionMode: dto.docSectionMode } : {}),
+          ...(dto.twoFactorEnabled !== undefined ? { twoFactorEnabled: dto.twoFactorEnabled } : {}),
+          ...(dto.preferences !== undefined
+            ? { preferences: dto.preferences as Prisma.InputJsonValue }
+            : {}),
+          updateUserId: user.id,
+        },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'User',
+          recordId: user.id,
+          recordCode: updated.username,
+          oldValues: existing,
+          newValues: updated,
+          actor: user,
+          tx,
+        });
+      }
     });
     return this.findOne(user.id);
   }
@@ -423,25 +492,41 @@ export class UsersService {
       throw new BadRequestException('You cannot deactivate your own active account.');
     }
     const nextActive = !existing.isActive;
-    await this.prisma.user.update({
-      where: { id },
-      data: { isActive: nextActive },
-    });
-    if (!nextActive) {
-      await this.prisma.refreshToken.updateMany({
-        where: { userId: id, revokedAt: null },
-        data: { revokedAt: new Date() },
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id },
+        data: { isActive: nextActive, updateUserId: actor.id },
       });
-    }
-    await this.auditService.log({
-      entityType: 'user',
-      entityId: id,
-      action: 'TOGGLE_STATUS',
-      step: `Set user ${existing.username} status to ${nextActive ? 'Active' : 'Inactive'}`,
-      fromStatus: existing.isActive ? 'Active' : 'Inactive',
-      toStatus: nextActive ? 'Active' : 'Inactive',
-      performedById: actor.id,
-      performedByName: actor.fullName,
+      if (!nextActive) {
+        await tx.refreshToken.updateMany({
+          where: { userId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'User',
+          recordId: id,
+          recordCode: existing.username,
+          oldValues: { isActive: existing.isActive },
+          newValues: { isActive: updated.isActive },
+          description: `Set user ${existing.username} status to ${nextActive ? 'Active' : 'Inactive'}`,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'user',
+        entityId: id,
+        action: 'TOGGLE_STATUS',
+        step: `Set user ${existing.username} status to ${nextActive ? 'Active' : 'Inactive'}`,
+        fromStatus: existing.isActive ? 'Active' : 'Inactive',
+        toStatus: nextActive ? 'Active' : 'Inactive',
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     return this.findOne(id);
   }
@@ -450,27 +535,48 @@ export class UsersService {
     const existing = await this.prisma.user.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException(`User #${id} not found.`);
     const passwordHash = await bcrypt.hash(dto.newPassword, 12);
-    await this.prisma.$transaction([
-      this.prisma.user.update({
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
         where: { id },
         data: {
           passwordHash,
           isTemporaryPassword: true,
           requireChangeOnLogin: dto.requireChangeOnLogin ?? true,
+          updateUserId: actor.id,
         },
-      }),
-      this.prisma.refreshToken.updateMany({
+      });
+      await tx.refreshToken.updateMany({
         where: { userId: id, revokedAt: null },
         data: { revokedAt: new Date() },
-      }),
-    ]);
-    await this.auditService.log({
-      entityType: 'user',
-      entityId: id,
-      action: 'PASSWORD_RESET',
-      step: `Administrator reset password for ${existing.username}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'User',
+          recordId: id,
+          recordCode: existing.username,
+          oldValues: {
+            isTemporaryPassword: existing.isTemporaryPassword,
+            requireChangeOnLogin: existing.requireChangeOnLogin,
+          },
+          newValues: {
+            isTemporaryPassword: updated.isTemporaryPassword,
+            requireChangeOnLogin: updated.requireChangeOnLogin,
+          },
+          description: `Administrator reset password for ${existing.username} (credentials redacted)`,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'user',
+        entityId: id,
+        action: 'PASSWORD_RESET',
+        step: `Administrator reset password for ${existing.username}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     return { reset: true, userId: id };
   }
@@ -515,6 +621,7 @@ export class UsersService {
     const userGroupId = dto.userGroupId || `UG-${code.replace(/[^A-Z0-9]/g, '').slice(0, 8)}`;
 
     const saved = await this.prisma.$transaction(async (tx) => {
+      const existingGroup = await tx.userGroup.findUnique({ where: { userGroupId } });
       const group = await tx.userGroup.upsert({
         where: { userGroupId },
         create: {
@@ -525,6 +632,8 @@ export class UsersService {
           defaultRoleId: dto.defaultRoleId,
           defaultBadge: dto.defaultBadge || 'User',
           isAllFullAuth: dto.isAllFullAuth ?? false,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
         update: {
           groupCode: code,
@@ -533,6 +642,7 @@ export class UsersService {
           defaultRoleId: dto.defaultRoleId,
           defaultBadge: dto.defaultBadge || 'User',
           isAllFullAuth: dto.isAllFullAuth ?? false,
+          updateUserId: actor.id,
         },
       });
 
@@ -555,11 +665,36 @@ export class UsersService {
               canEdit: sd.canEdit,
               canApprove: sd.canApprove,
               canExport: sd.canExport,
+              createUserId: actor.id,
+              updateUserId: actor.id,
             };
           })
           .filter((r): r is NonNullable<typeof r> => r !== null);
         if (rows.length > 0) {
           await tx.userGroupScreenDefault.createMany({ data: rows });
+        }
+      }
+
+      if (this.changeLogService) {
+        if (existingGroup) {
+          await this.changeLogService.logUpdate({
+            tableName: 'UserGroup',
+            recordId: group.id,
+            recordCode: group.userGroupId,
+            oldValues: existingGroup,
+            newValues: group,
+            actor,
+            tx,
+          });
+        } else {
+          await this.changeLogService.logCreate({
+            tableName: 'UserGroup',
+            recordId: group.id,
+            recordCode: group.userGroupId,
+            newValues: group,
+            actor,
+            tx,
+          });
         }
       }
 

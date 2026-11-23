@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { SaveRoleDto, UpdateRolePermissionsDto } from './dto/roles.dto';
 
@@ -23,6 +24,7 @@ export class RolesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   async findAll() {
@@ -77,6 +79,8 @@ export class RolesService {
           name: dto.name.trim(),
           description: dto.description || '',
           isActive: dto.status === undefined ? true : dto.status === 1,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
       });
       await tx.rolePermission.createMany({
@@ -89,8 +93,20 @@ export class RolesService {
           canDelete: false,
           canApprove: false,
           canUnblock: false,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         })),
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'Role',
+          recordId: created.id,
+          recordCode: created.code,
+          newValues: created,
+          actor,
+          tx,
+        });
+      }
       await this.auditService.log({
         entityType: 'role',
         entityId: created.id,
@@ -108,24 +124,39 @@ export class RolesService {
   }
 
   async update(actor: AuthenticatedUser, id: number, dto: SaveRoleDto) {
-    const existing = await this.prisma.role.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Role #${id} not found.`);
-    await this.prisma.role.update({
-      where: { id },
-      data: {
-        code: dto.code.trim().toUpperCase(),
-        name: dto.name.trim(),
-        description: dto.description || '',
-        isActive: dto.status === undefined ? existing.isActive : dto.status === 1,
-      },
-    });
-    await this.auditService.log({
-      entityType: 'role',
-      entityId: id,
-      action: 'UPDATE',
-      step: `Updated Role ${dto.name}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.role.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Role #${id} not found.`);
+      const updated = await tx.role.update({
+        where: { id },
+        data: {
+          code: dto.code.trim().toUpperCase(),
+          name: dto.name.trim(),
+          description: dto.description || '',
+          isActive: dto.status === undefined ? existing.isActive : dto.status === 1,
+          updateUserId: actor.id,
+        },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'Role',
+          recordId: id,
+          recordCode: updated.code,
+          oldValues: existing,
+          newValues: updated,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'role',
+        entityId: id,
+        action: 'UPDATE',
+        step: `Updated Role ${dto.name}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     const list = await this.findAll();
     return list.find((r) => r.id === id);
@@ -136,33 +167,75 @@ export class RolesService {
     id: number,
     dto: UpdateRolePermissionsDto,
   ) {
-    const existing = await this.prisma.role.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Role #${id} not found.`);
-
     await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.role.findUnique({
+        where: { id },
+        include: { permissions: true },
+      });
+      if (!existing) throw new NotFoundException(`Role #${id} not found.`);
+
+      const oldPermsMap: Record<string, unknown> = {};
+      for (const p of existing.permissions) {
+        oldPermsMap[p.moduleKey] = {
+          read: p.canRead,
+          create: p.canCreate,
+          update: p.canUpdate,
+          delete: p.canDelete,
+          approve: p.canApprove,
+          unblock: p.canUnblock,
+        };
+      }
+
+      const newPermsMap: Record<string, unknown> = { ...oldPermsMap };
       for (const [moduleKey, perms] of Object.entries(dto.permissions)) {
+        const nextVal = {
+          read: Boolean(perms.read),
+          create: Boolean(perms.create),
+          update: Boolean(perms.update),
+          delete: Boolean(perms.delete),
+          approve: Boolean(perms.approve),
+          unblock: Boolean(perms.unblock),
+        };
+        newPermsMap[moduleKey] = nextVal;
         await tx.rolePermission.upsert({
           where: { roleId_moduleKey: { roleId: id, moduleKey } },
           create: {
             roleId: id,
             moduleKey,
-            canRead: Boolean(perms.read),
-            canCreate: Boolean(perms.create),
-            canUpdate: Boolean(perms.update),
-            canDelete: Boolean(perms.delete),
-            canApprove: Boolean(perms.approve),
-            canUnblock: Boolean(perms.unblock),
+            canRead: nextVal.read,
+            canCreate: nextVal.create,
+            canUpdate: nextVal.update,
+            canDelete: nextVal.delete,
+            canApprove: nextVal.approve,
+            canUnblock: nextVal.unblock,
+            createUserId: actor.id,
+            updateUserId: actor.id,
           },
           update: {
-            canRead: Boolean(perms.read),
-            canCreate: Boolean(perms.create),
-            canUpdate: Boolean(perms.update),
-            canDelete: Boolean(perms.delete),
-            canApprove: Boolean(perms.approve),
-            canUnblock: Boolean(perms.unblock),
+            canRead: nextVal.read,
+            canCreate: nextVal.create,
+            canUpdate: nextVal.update,
+            canDelete: nextVal.delete,
+            canApprove: nextVal.approve,
+            canUnblock: nextVal.unblock,
+            updateUserId: actor.id,
           },
         });
       }
+
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'RolePermission',
+          recordId: id,
+          recordCode: existing.code,
+          oldValues: oldPermsMap,
+          newValues: newPermsMap,
+          description: `Updated RBAC permissions matrix for role ${existing.name}`,
+          actor,
+          tx,
+        });
+      }
+
       await this.auditService.log({
         entityType: 'role',
         entityId: id,

@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { UpdateNotificationTemplateDto } from './dto/notifications.dto';
 
@@ -9,6 +10,7 @@ export class NotificationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   private serializeTemplate(t: {
@@ -60,36 +62,54 @@ export class NotificationsService {
     });
     if (!existing) throw new NotFoundException(`Notification template "${idOrCode}" not found.`);
 
-    const updated = await this.prisma.notificationTemplate.update({
-      where: { id: existing.id },
-      data: {
-        ...(dto.subject !== undefined ? { subject: dto.subject } : {}),
-        ...(dto.body !== undefined ? { body: dto.body } : {}),
-        ...(dto.emailEnabled !== undefined ? { emailEnabled: dto.emailEnabled } : {}),
-        ...(dto.systemAlertEnabled !== undefined
-          ? { systemAlertEnabled: dto.systemAlertEnabled }
-          : {}),
-        ...(dto.mobilePushEnabled !== undefined
-          ? { mobilePushEnabled: dto.mobilePushEnabled }
-          : {}),
-        ...(dto.channels?.email !== undefined ? { emailEnabled: dto.channels.email } : {}),
-        ...(dto.channels?.systemAlert !== undefined
-          ? { systemAlertEnabled: dto.channels.systemAlert }
-          : {}),
-        ...(dto.channels?.mobilePush !== undefined
-          ? { mobilePushEnabled: dto.channels.mobilePush }
-          : {}),
-      },
-    });
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.notificationTemplate.update({
+        where: { id: existing.id },
+        data: {
+          ...(dto.subject !== undefined ? { subject: dto.subject } : {}),
+          ...(dto.body !== undefined ? { body: dto.body } : {}),
+          ...(dto.emailEnabled !== undefined ? { emailEnabled: dto.emailEnabled } : {}),
+          ...(dto.systemAlertEnabled !== undefined
+            ? { systemAlertEnabled: dto.systemAlertEnabled }
+            : {}),
+          ...(dto.mobilePushEnabled !== undefined
+            ? { mobilePushEnabled: dto.mobilePushEnabled }
+            : {}),
+          ...(dto.channels?.email !== undefined ? { emailEnabled: dto.channels.email } : {}),
+          ...(dto.channels?.systemAlert !== undefined
+            ? { systemAlertEnabled: dto.channels.systemAlert }
+            : {}),
+          ...(dto.channels?.mobilePush !== undefined
+            ? { mobilePushEnabled: dto.channels.mobilePush }
+            : {}),
+          updateUserId: actor.id,
+        },
+      });
 
-    await this.auditService.log({
-      entityType: 'notification_template',
-      entityId: updated.id,
-      docNo: updated.code,
-      action: 'UPDATE',
-      step: `Updated notification template ${updated.name}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'NotificationTemplate',
+          recordId: next.id,
+          recordCode: next.code,
+          oldValues: existing,
+          newValues: next,
+          actor,
+          tx,
+        });
+      }
+
+      await this.auditService.log({
+        entityType: 'notification_template',
+        entityId: next.id,
+        docNo: next.code,
+        action: 'UPDATE',
+        step: `Updated notification template ${next.name}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
+
+      return next;
     });
 
     return this.serializeTemplate(updated);

@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { toNumber, toPrismaDecimal, toPrismaRate } from '../common/utils/decimal.util';
 import { UpdateBusinessConfigDto } from './dto/business-config.dto';
@@ -10,7 +11,8 @@ export class BusinessConfigService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   private serialize(cfg: {
     id: number;
@@ -126,14 +128,29 @@ export class BusinessConfigService {
         resolvedBaseCurrency = curRecord.code;
         resolvedBaseSymbol = dto.currency.baseSymbol || curRecord.symbol;
 
-        await tx.currency.updateMany({ data: { isBase: false } });
-        await tx.currency.update({
+        const previousBaseCurrencies = await tx.currency.findMany({ where: { isBase: true } });
+        await tx.currency.updateMany({
+          data: { isBase: false, updateUserId: actor.id },
+        });
+        const updatedCur = await tx.currency.update({
           where: { id: curRecord.id },
-          data: { isBase: true, rateToBase: toPrismaRate(1) },
+          data: { isBase: true, rateToBase: toPrismaRate(1), updateUserId: actor.id },
         });
         await tx.company.updateMany({
-          data: { baseCurrencyCode: curRecord.code },
+          data: { baseCurrencyCode: curRecord.code, updateUserId: actor.id },
         });
+        if (this.changeLogService && curRecord.code !== existing.baseCurrency) {
+          await this.changeLogService.logUpdate({
+            tableName: 'Currency',
+            recordId: updatedCur.id,
+            recordCode: updatedCur.code,
+            oldValues: curRecord,
+            newValues: updatedCur,
+            description: `Promoted ${updatedCur.code} to System Primary Base Currency (previous: ${previousBaseCurrencies.map((c) => c.code).join(', ') || existing.baseCurrency})`,
+            actor,
+            tx,
+          });
+        }
       }
 
       let resolvedOpCurrency = existing.operationalCurrency;
@@ -235,8 +252,21 @@ export class BusinessConfigService {
           ...(dto.regional?.businessWeekDays !== undefined
             ? { businessWeekDays: dto.regional.businessWeekDays }
             : {}),
+          updateUserId: actor.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'BusinessConfig',
+          recordId: next.id,
+          recordCode: `CFG-${next.id}`,
+          oldValues: existing,
+          newValues: next,
+          actor,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'business_config',

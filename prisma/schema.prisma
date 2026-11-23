@@ -23,6 +23,8 @@ model Company {
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
   branches               Branch[]
   userAccess             UserCompanyAccess[]
@@ -44,20 +46,24 @@ model Company {
   varianceIncidents      VarianceIncident[]
 
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("companies")
 }
 
 model Branch {
-  id          Int      @id @default(autoincrement())
-  companyId   Int
-  code        String   @unique @db.VarChar(50)
-  name        String   @db.VarChar(150)
-  city        String   @db.VarChar(100)
-  managerName String?  @db.VarChar(150)
-  contactNo   String?  @db.VarChar(50)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  companyId    Int
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  city         String   @db.VarChar(100)
+  managerName  String?  @db.VarChar(150)
+  contactNo    String?  @db.VarChar(50)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   company                Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
   outlets                Outlet[]
@@ -82,6 +88,8 @@ model Branch {
 
   @@index([companyId])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("branches")
 }
 
@@ -96,6 +104,8 @@ model Outlet {
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  createUserId  Int?
+  updateUserId  Int?
 
   branch                 Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
   employees              Employee[]
@@ -120,6 +130,8 @@ model Outlet {
 
   @@index([branchId])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("outlets")
 }
 
@@ -132,6 +144,8 @@ model Department {
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
   employees           Employee[]
   expenseCategories   ExpenseCategory[]
@@ -145,22 +159,28 @@ model Department {
   pettyCashReturns    PettyCashReturn[]
 
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("departments")
 }
 
 model Location {
-  id        Int      @id @default(autoincrement())
-  branchId  Int
-  code      String   @unique @db.VarChar(50)
-  name      String   @db.VarChar(150)
-  address   String?  @db.VarChar(255)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  branchId     Int
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  address      String?  @db.VarChar(255)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([branchId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("locations")
 }
 
@@ -176,6 +196,8 @@ model Employee {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   department                 Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   outlet                     Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
@@ -199,6 +221,8 @@ model Employee {
   @@index([departmentId])
   @@index([outletId])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("employees")
 }
 
@@ -212,10 +236,14 @@ model Shift {
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  createUserId  Int?
+  updateUserId  Int?
 
   salesReconciliations     SalesReconciliation[]
   salesReconciliationLines SalesReconciliationLine[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("shifts")
 }
 
@@ -231,6 +259,8 @@ model Currency {
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  createUserId  Int?
+  updateUserId  Int?
 
   fromExchangeRates         ExchangeRate[]              @relation("FromCurrency")
   toExchangeRates           ExchangeRate[]              @relation("ToCurrency")
@@ -255,6 +285,8 @@ model Currency {
 
   @@index([isBase])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("currencies")
 }
 
@@ -268,45 +300,59 @@ model ExchangeRate {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  createUserId   Int?
+  updateUserId   Int?
 
   fromCurrency Currency @relation("FromCurrency", fields: [fromCurrencyId], references: [id], onDelete: Restrict)
   toCurrency   Currency @relation("ToCurrency", fields: [toCurrencyId], references: [id], onDelete: Restrict)
 
   @@index([fromCurrencyId, toCurrencyId, effectiveDate])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("exchange_rates")
 }
 
 model Denomination {
-  id           Int      @id @default(autoincrement())
+  id           Int     @id @default(autoincrement())
   currencyId   Int
-  value        Decimal  @db.Decimal(18, 2)
-  label        String   @db.VarChar(100)
-  denomType    String   @default("Bill") @db.VarChar(20)
-  displayOrder Int      @default(1)
-  isActive     Boolean  @default(true)
+  value        Decimal @db.Decimal(18, 2)
+  label        String  @db.VarChar(100)
+  denomType    String  @default("Bill") @db.VarChar(20)
+  displayOrder Int     @default(1)
+  isActive     Boolean @default(true)
 
-  currency Currency @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  currency     Currency @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@unique([currencyId, value])
   @@index([currencyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("denominations")
 }
 
 model Bank {
-  id          Int      @id @default(autoincrement())
-  code        String   @unique @db.VarChar(50)
-  name        String   @db.VarChar(150)
-  swiftCode   String?  @db.VarChar(50)
-  country     String   @default("Maldives") @db.VarChar(100)
-  contactInfo String?  @db.VarChar(150)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  swiftCode    String?  @db.VarChar(50)
+  country      String   @default("Maldives") @db.VarChar(100)
+  contactInfo  String?  @db.VarChar(150)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   bankAccounts     BankAccount[]
   paymentTerminals PaymentTerminal[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("banks")
 }
 
@@ -321,6 +367,8 @@ model BankAccount {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  createUserId   Int?
+  updateUserId   Int?
 
   bank                   Bank                    @relation(fields: [bankId], references: [id], onDelete: Restrict)
   currency               Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
@@ -330,6 +378,8 @@ model BankAccount {
 
   @@index([bankId])
   @@index([currencyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("bank_accounts")
 }
 
@@ -345,6 +395,8 @@ model FloatAccount {
   isActive           Boolean  @default(true)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
 
   currency            Currency             @relation(fields: [currencyId], references: [id], onDelete: Restrict)
   assignedEmployee    Employee?            @relation(fields: [assignedEmployeeId], references: [id], onDelete: SetNull)
@@ -358,40 +410,50 @@ model FloatAccount {
   @@index([currencyId])
   @@index([assignedEmployeeId])
   @@index([outletId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("float_accounts")
 }
 
 model GlAccount {
-  id         Int      @id @default(autoincrement())
-  code       String   @unique @db.VarChar(50)
-  name       String   @db.VarChar(150)
-  category   String   @db.VarChar(50)
-  isCashBank Boolean  @default(false)
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  category     String   @db.VarChar(50)
+  isCashBank   Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   expenseCategories ExpenseCategory[]
   paymentTypes      PaymentType[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("gl_accounts")
 }
 
 model Vendor {
-  id          Int      @id @default(autoincrement())
-  code        String   @unique @db.VarChar(50)
-  name        String   @db.VarChar(150)
-  category    String   @db.VarChar(100)
-  taxId       String?  @db.VarChar(100)
-  contactInfo String?  @db.VarChar(150)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(150)
+  category     String   @db.VarChar(100)
+  taxId        String?  @db.VarChar(100)
+  contactInfo  String?  @db.VarChar(150)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   cashierPayments     CashierPayment[]
   mainCashierPayments MainCashierPayment[]
   pettyCashBillLines  PettyCashBillLine[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("vendors")
 }
 
@@ -404,6 +466,8 @@ model ExpenseCategory {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   department         Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   glAccount          GlAccount           @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
@@ -414,6 +478,8 @@ model ExpenseCategory {
 
   @@index([departmentId])
   @@index([glAccountId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("expense_categories")
 }
 
@@ -427,10 +493,14 @@ model ExpenseType {
   isActive          Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   category ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
   @@index([categoryId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("expense_types")
 }
 
@@ -445,11 +515,15 @@ model Budget {
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  createUserId    Int?
+  updateUserId    Int?
 
   department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
 
   @@unique([departmentId, fiscalYear])
   @@index([departmentId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("budgets")
 }
 
@@ -462,7 +536,11 @@ model CashAdvanceType {
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  createUserId    Int?
+  updateUserId    Int?
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_advance_types")
 }
 
@@ -475,6 +553,8 @@ model PaymentType {
   isActive              Boolean  @default(true)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
+  createUserId          Int?
+  updateUserId          Int?
 
   glAccount                GlAccount                 @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
   subTypes                 PaymentSubType[]
@@ -482,6 +562,8 @@ model PaymentType {
   salesReconciliationLines SalesReconciliationLine[]
 
   @@index([glAccountId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("payment_types")
 }
 
@@ -496,12 +578,16 @@ model PaymentSubType {
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
   paymentType PaymentType @relation(fields: [paymentTypeId], references: [id], onDelete: Restrict)
   currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
 
   @@index([paymentTypeId])
   @@index([currencyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("payment_sub_types")
 }
 
@@ -515,12 +601,16 @@ model PaymentTerminal {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Restrict)
   bank   Bank   @relation(fields: [bankId], references: [id], onDelete: Restrict)
 
   @@index([outletId])
   @@index([bankId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("payment_terminals")
 }
 
@@ -535,7 +625,11 @@ model ApprovalWorkflowMaster {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  createUserId   Int?
+  updateUserId   Int?
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_workflows")
 }
 
@@ -555,11 +649,15 @@ model FormMaster {
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
   numberSeries NumberSeries[]
   screens      Screen[]
 
   @@index([category])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("form_masters")
 }
 
@@ -568,36 +666,46 @@ model FormMaster {
 // ============================================================================
 
 model Role {
-  id          Int      @id @default(autoincrement())
-  code        String   @unique @db.VarChar(50)
-  name        String   @db.VarChar(100)
-  description String?  @db.VarChar(255)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(100)
+  description  String?  @db.VarChar(255)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   permissions RolePermission[]
   users       User[]
   userGroups  UserGroup[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("roles")
 }
 
 model RolePermission {
-  id        Int     @id @default(autoincrement())
-  roleId    Int
-  moduleKey String  @db.VarChar(60)
-  canRead   Boolean @default(false)
-  canCreate Boolean @default(false)
-  canUpdate Boolean @default(false)
-  canDelete Boolean @default(false)
+  id         Int     @id @default(autoincrement())
+  roleId     Int
+  moduleKey  String  @db.VarChar(60)
+  canRead    Boolean @default(false)
+  canCreate  Boolean @default(false)
+  canUpdate  Boolean @default(false)
+  canDelete  Boolean @default(false)
   canApprove Boolean @default(false)
   canUnblock Boolean @default(false)
 
-  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  role         Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@unique([roleId, moduleKey])
   @@index([roleId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("role_permissions")
 }
 
@@ -613,11 +721,15 @@ model UserGroup {
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  createUserId  Int?
+  updateUserId  Int?
 
   defaultRole    Role                     @relation(fields: [defaultRoleId], references: [id], onDelete: Restrict)
   users          User[]
   screenDefaults UserGroupScreenDefault[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_groups")
 }
 
@@ -635,13 +747,17 @@ model Screen {
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
-  formMaster    FormMaster?              @relation(fields: [formId], references: [formId], onDelete: Restrict)
+  formMaster    FormMaster?               @relation(fields: [formId], references: [formId], onDelete: Restrict)
   groupDefaults UserGroupScreenDefault[]
   userAuths     UserScreenAuthorization[]
 
   @@index([routeKey])
   @@index([category])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("screens")
 }
 
@@ -656,10 +772,16 @@ model UserGroupScreenDefault {
   canApprove  Boolean @default(false)
   canExport   Boolean @default(false)
 
-  userGroup UserGroup @relation(fields: [userGroupId], references: [id], onDelete: Cascade)
-  screen    Screen    @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  userGroup    UserGroup @relation(fields: [userGroupId], references: [id], onDelete: Cascade)
+  screen       Screen    @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
 
   @@unique([userGroupId, screenId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_group_screen_defaults")
 }
 
@@ -672,8 +794,14 @@ model MenuNode {
   level      Int
 
   userMenuAuths UserMenuAuthorization[]
+  createUserId  Int?
+  updateUserId  Int?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @default(now()) @updatedAt
 
   @@index([parentId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("menu_nodes")
 }
 
@@ -703,29 +831,34 @@ model User {
   lastLoginAt          DateTime?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
+  createUserId         Int?
+  updateUserId         Int?
 
-  role                  Role                      @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  userGroup             UserGroup?                @relation(fields: [userGroupId], references: [id], onDelete: SetNull)
-  employee              Employee?                 @relation(fields: [employeeId], references: [id], onDelete: SetNull)
-  companyAccess         UserCompanyAccess[]
-  branchAccess          UserBranchAccess[]
-  outletAccess          UserOutletAccess[]
-  departmentAccess      UserDepartmentAccess[]
-  screenAuthorizations  UserScreenAuthorization[]
-  menuAuthorizations    UserMenuAuthorization[]
-  refreshTokens         RefreshToken[]
-  stageApprovals        ApprovalStageApprover[]
-  templateOriginators   ApprovalTemplateOriginator[]
-  submittedApprovals    ApprovalInstance[]        @relation("ApprovalSubmitter")
-  approvalDecisions     ApprovalDecision[]
-  auditLogs             AuditLog[]
-  auditExportBatches    AuditExportBatch[]
-  notificationLogs      NotificationLog[]
-  uploadedAttachments   DocumentAttachment[]
+  role                 Role                         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  userGroup            UserGroup?                   @relation(fields: [userGroupId], references: [id], onDelete: SetNull)
+  employee             Employee?                    @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  companyAccess        UserCompanyAccess[]
+  branchAccess         UserBranchAccess[]
+  outletAccess         UserOutletAccess[]
+  departmentAccess     UserDepartmentAccess[]
+  screenAuthorizations UserScreenAuthorization[]
+  menuAuthorizations   UserMenuAuthorization[]
+  refreshTokens        RefreshToken[]
+  stageApprovals       ApprovalStageApprover[]
+  templateOriginators  ApprovalTemplateOriginator[]
+  submittedApprovals   ApprovalInstance[]           @relation("ApprovalSubmitter")
+  approvalDecisions    ApprovalDecision[]
+  auditLogs            AuditLog[]
+  changeLogs           ChangeLog[]                  @relation("ChangeLogActor")
+  auditExportBatches   AuditExportBatch[]
+  notificationLogs     NotificationLog[]
+  uploadedAttachments  DocumentAttachment[]
 
   @@index([roleId])
   @@index([userGroupId])
   @@index([isActive])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("users")
 }
 
@@ -750,10 +883,16 @@ model UserCompanyAccess {
   userId    Int
   companyId Int
 
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@id([userId, companyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_company_access")
 }
 
@@ -761,10 +900,16 @@ model UserBranchAccess {
   userId   Int
   branchId Int
 
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@id([userId, branchId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_branch_access")
 }
 
@@ -772,10 +917,16 @@ model UserOutletAccess {
   userId   Int
   outletId Int
 
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outlet       Outlet   @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@id([userId, outletId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_outlet_access")
 }
 
@@ -783,10 +934,16 @@ model UserDepartmentAccess {
   userId       Int
   departmentId Int
 
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @default(now()) @updatedAt
 
   @@id([userId, departmentId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_department_access")
 }
 
@@ -801,11 +958,17 @@ model UserScreenAuthorization {
   canApprove Boolean @default(false)
   canExport  Boolean @default(false)
 
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  screen Screen @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  screen       Screen   @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@unique([userId, screenId])
   @@index([userId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_screen_authorizations")
 }
 
@@ -815,11 +978,17 @@ model UserMenuAuthorization {
   menuId    Int
   authLevel Int @default(6)
 
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  menuNode MenuNode @relation(fields: [menuId], references: [menuId], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuNode     MenuNode @relation(fields: [menuId], references: [menuId], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
 
   @@unique([userId, menuId])
   @@index([userId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("user_menu_authorizations")
 }
 
@@ -841,53 +1010,62 @@ model NumberSeries {
   status          String   @default("Active") @db.VarChar(30)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  createUserId    Int?
+  updateUserId    Int?
 
   formMaster FormMaster @relation(fields: [formId], references: [formId], onDelete: Restrict)
   branch     Branch?    @relation(fields: [branchId], references: [id], onDelete: SetNull)
 
   @@index([formId, isDefault])
   @@index([branchId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("number_series")
 }
 
 model BusinessConfig {
-  id                           Int      @id @default(autoincrement())
-  primaryOperatingCompanyId    Int?
-  baseCurrency                 String   @default("USD") @db.VarChar(10)
-  baseSymbol                   String   @default("$") @db.VarChar(15)
-  operationalCurrency          String   @default("MVR") @db.VarChar(10)
-  operationalSymbol            String   @default("Rf") @db.VarChar(15)
-  exchangeRateMode             String   @default("Fixed") @db.VarChar(30)
-  fixedExchangeRateMVR         Decimal  @default(15.42) @db.Decimal(18, 6)
-  fixedExchangeRateEUR         Decimal  @default(1.09) @db.Decimal(18, 6)
-  decimalPrecision             Int      @default(2)
-  roundingMethod               String   @default("standard") @db.VarChar(30)
-  varianceTolerancePercent     Decimal  @default(0.5) @db.Decimal(6, 3)
-  fiscalYearStartMonth         String   @default("January") @db.VarChar(20)
-  currentFiscalYear            String   @default("2026") @db.VarChar(10)
-  dailyShiftCutOffTime         String   @default("23:59") @db.VarChar(10)
-  periodLockEnabled            Boolean  @default(true)
-  transitGracePeriodHours      Int      @default(48)
-  taxRegistrationNo            String   @default("TIN-994012") @db.VarChar(100)
-  defaultTGSTRate              Decimal  @default(16.0) @db.Decimal(6, 2)
-  pettyCashGstRate             Decimal  @default(8.0) @db.Decimal(6, 2)
-  serviceChargeRate            Decimal  @default(10.0) @db.Decimal(6, 2)
-  maxCashAdvanceVoucherBase    Decimal  @default(500.0) @db.Decimal(18, 2)
-  dualSignatoryRequiredBase    Decimal  @default(1000.0) @db.Decimal(18, 2)
-  mandatoryReceiptThresholdBase Decimal @default(25.0) @db.Decimal(18, 2)
-  defaultOutletTillFloatBase   Decimal  @default(2000.0) @db.Decimal(18, 2)
-  highVarianceAlertBase        Decimal  @default(100.0) @db.Decimal(18, 2)
-  iouOverdueEscalationDays     Int      @default(14)
-  maximumIOUValidityDays       Int      @default(30)
-  timezone                     String   @default("Indian/Maldives (UTC+5)") @db.VarChar(80)
-  dateFormat                   String   @default("DD-MMM-YYYY") @db.VarChar(30)
-  timeFormat                   String   @default("12-hour") @db.VarChar(20)
-  currencyPosition             String   @default("prefix") @db.VarChar(20)
-  businessWeekDays             String[] @default(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"])
-  updatedAt                    DateTime @updatedAt
+  id                            Int      @id @default(autoincrement())
+  primaryOperatingCompanyId     Int?
+  baseCurrency                  String   @default("USD") @db.VarChar(10)
+  baseSymbol                    String   @default("$") @db.VarChar(15)
+  operationalCurrency           String   @default("MVR") @db.VarChar(10)
+  operationalSymbol             String   @default("Rf") @db.VarChar(15)
+  exchangeRateMode              String   @default("Fixed") @db.VarChar(30)
+  fixedExchangeRateMVR          Decimal  @default(15.42) @db.Decimal(18, 6)
+  fixedExchangeRateEUR          Decimal  @default(1.09) @db.Decimal(18, 6)
+  decimalPrecision              Int      @default(2)
+  roundingMethod                String   @default("standard") @db.VarChar(30)
+  varianceTolerancePercent      Decimal  @default(0.5) @db.Decimal(6, 3)
+  fiscalYearStartMonth          String   @default("January") @db.VarChar(20)
+  currentFiscalYear             String   @default("2026") @db.VarChar(10)
+  dailyShiftCutOffTime          String   @default("23:59") @db.VarChar(10)
+  periodLockEnabled             Boolean  @default(true)
+  transitGracePeriodHours       Int      @default(48)
+  taxRegistrationNo             String   @default("TIN-994012") @db.VarChar(100)
+  defaultTGSTRate               Decimal  @default(16.0) @db.Decimal(6, 2)
+  pettyCashGstRate              Decimal  @default(8.0) @db.Decimal(6, 2)
+  serviceChargeRate             Decimal  @default(10.0) @db.Decimal(6, 2)
+  maxCashAdvanceVoucherBase     Decimal  @default(500.0) @db.Decimal(18, 2)
+  dualSignatoryRequiredBase     Decimal  @default(1000.0) @db.Decimal(18, 2)
+  mandatoryReceiptThresholdBase Decimal  @default(25.0) @db.Decimal(18, 2)
+  defaultOutletTillFloatBase    Decimal  @default(2000.0) @db.Decimal(18, 2)
+  highVarianceAlertBase         Decimal  @default(100.0) @db.Decimal(18, 2)
+  iouOverdueEscalationDays      Int      @default(14)
+  maximumIOUValidityDays        Int      @default(30)
+  timezone                      String   @default("Indian/Maldives (UTC+5)") @db.VarChar(80)
+  dateFormat                    String   @default("DD-MMM-YYYY") @db.VarChar(30)
+  timeFormat                    String   @default("12-hour") @db.VarChar(20)
+  currencyPosition              String   @default("prefix") @db.VarChar(20)
+  businessWeekDays              String[] @default(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"])
+  updatedAt                     DateTime @updatedAt
+  createUserId                  Int?
+  updateUserId                  Int?
+  createdAt                     DateTime @default(now())
 
   primaryCompany Company? @relation(fields: [primaryOperatingCompanyId], references: [id], onDelete: SetNull)
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("business_configs")
 }
 
@@ -905,9 +1083,14 @@ model NotificationTemplate {
   variables          String[] @default([])
   isActive           Boolean  @default(true)
   updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
+  createdAt          DateTime @default(now())
 
   logs NotificationLog[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("notification_templates")
 }
 
@@ -923,12 +1106,17 @@ model NotificationLog {
   entityId        Int?
   isRead          Boolean  @default(false)
   createdAt       DateTime @default(now())
+  createUserId    Int?
+  updateUserId    Int?
+  updatedAt       DateTime @default(now()) @updatedAt
 
   template  NotificationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
   recipient User?                 @relation(fields: [recipientUserId], references: [id], onDelete: SetNull)
 
   @@index([recipientUserId, isRead])
   @@index([createdAt])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("notification_logs")
 }
 
@@ -945,7 +1133,12 @@ model PrintTemplate {
   headerConfig Json?
   isActive     Boolean  @default(true)
   updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime @default(now())
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("print_templates")
 }
 
@@ -965,10 +1158,15 @@ model DocumentAttachment {
   uploadedById   Int?
   uploadedByName String   @default("") @db.VarChar(150)
   createdAt      DateTime @default(now())
+  createUserId   Int?
+  updateUserId   Int?
+  updatedAt      DateTime @default(now()) @updatedAt
 
   uploadedBy User? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
 
   @@index([entityType, entityId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("document_attachments")
 }
 
@@ -1006,10 +1204,15 @@ model AuditExportBatch {
   exportedById    Int
   payloadSummary  Json?
   createdAt       DateTime @default(now())
+  createUserId    Int?
+  updateUserId    Int?
+  updatedAt       DateTime @default(now()) @updatedAt
 
   exportedBy User @relation(fields: [exportedById], references: [id], onDelete: Restrict)
 
   @@index([createdAt])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("audit_export_batches")
 }
 
@@ -1041,22 +1244,26 @@ model CashDeposit {
   approvedAt       DateTime?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
-  company                  Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  branch                   Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  outlet                   Outlet                    @relation(fields: [outletId], references: [id], onDelete: Restrict)
-  cashier                  Employee                  @relation("DepositCashier", fields: [cashierId], references: [id], onDelete: Restrict)
-  cashCollector            Employee                  @relation("DepositCollector", fields: [cashCollectorId], references: [id], onDelete: Restrict)
-  paymentType              PaymentType               @relation(fields: [paymentTypeId], references: [id], onDelete: Restrict)
-  currencies               CashDepositCurrency[]
-  denominations            CashDepositDenomination[]
-  bankDepositItems         OutletBankDepositItem[]
-  linkedReconciliations    SalesReconciliation[]
-  autoFilledReconLines     SalesReconciliationLine[]
+  company               Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch                Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet                Outlet                    @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  cashier               Employee                  @relation("DepositCashier", fields: [cashierId], references: [id], onDelete: Restrict)
+  cashCollector         Employee                  @relation("DepositCollector", fields: [cashCollectorId], references: [id], onDelete: Restrict)
+  paymentType           PaymentType               @relation(fields: [paymentTypeId], references: [id], onDelete: Restrict)
+  currencies            CashDepositCurrency[]
+  denominations         CashDepositDenomination[]
+  bankDepositItems      OutletBankDepositItem[]
+  linkedReconciliations SalesReconciliation[]
+  autoFilledReconLines  SalesReconciliationLine[]
 
   @@index([companyId, branchId, outletId])
   @@index([collectionDate])
   @@index([status])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_deposits")
 }
 
@@ -1068,11 +1275,17 @@ model CashDepositCurrency {
   exRate        Decimal @db.Decimal(18, 6)
   baseAmount    Decimal @db.Decimal(18, 2)
 
-  cashDeposit CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
-  currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  cashDeposit  CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
+  currency     Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   @@index([cashDepositId])
   @@index([currencyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_deposit_currencies")
 }
 
@@ -1083,11 +1296,17 @@ model CashDepositDenomination {
   denominationValue Decimal @db.Decimal(18, 2)
   noteCount         Int     @default(0)
 
-  cashDeposit CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
-  currency    Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  cashDeposit  CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
+  currency     Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   @@index([cashDepositId])
   @@index([currencyId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_deposit_denominations")
 }
 
@@ -1124,6 +1343,8 @@ model CashierPayment {
   createdById        Int?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
 
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1138,33 +1359,37 @@ model CashierPayment {
   @@index([companyId, branchId, outletId])
   @@index([paymentDate])
   @@index([approvalStatus])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cashier_payments")
 }
 
 model CashierSettlement {
-  id                   Int       @id @default(autoincrement())
-  docNo                String    @unique @db.VarChar(60)
-  docDate              DateTime  @db.Date
-  fromDate             DateTime  @db.Date
-  toDate               DateTime  @db.Date
-  companyId            Int
-  branchId             Int
-  outletId             Int
-  fromCashierId        Int?
-  fromCashierName      String    @db.VarChar(150)
-  toCashierId          Int?
-  toCashierName        String    @db.VarChar(150)
-  floatAccountId       Int?
-  floatAccountName     String    @db.VarChar(180)
-  baseCurrencyCode     String    @default("USD") @db.VarChar(10)
-  totalTransferBase    Decimal   @default(0) @db.Decimal(18, 2)
-  narration            String?   @db.Text
-  status               String    @default("Pending Acceptance") @db.VarChar(40)
-  acceptedById         Int?
-  acceptedAt           DateTime?
-  createdById          Int?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  id                Int       @id @default(autoincrement())
+  docNo             String    @unique @db.VarChar(60)
+  docDate           DateTime  @db.Date
+  fromDate          DateTime  @db.Date
+  toDate            DateTime  @db.Date
+  companyId         Int
+  branchId          Int
+  outletId          Int
+  fromCashierId     Int?
+  fromCashierName   String    @db.VarChar(150)
+  toCashierId       Int?
+  toCashierName     String    @db.VarChar(150)
+  floatAccountId    Int?
+  floatAccountName  String    @db.VarChar(180)
+  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
+  totalTransferBase Decimal   @default(0) @db.Decimal(18, 2)
+  narration         String?   @db.Text
+  status            String    @default("Pending Acceptance") @db.VarChar(40)
+  acceptedById      Int?
+  acceptedAt        DateTime?
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   company      Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch       Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1178,6 +1403,8 @@ model CashierSettlement {
   @@index([companyId, branchId, outletId])
   @@index([status])
   @@index([docDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cashier_settlements")
 }
 
@@ -1194,10 +1421,16 @@ model CashierSettlementLine {
   baseTransferAmt Decimal @default(0) @db.Decimal(18, 2)
   denominations   Json?
 
-  settlement CashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
-  currency   Currency          @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  settlement   CashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  currency     Currency          @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @default(now()) @updatedAt
 
   @@index([settlementId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cashier_settlement_lines")
 }
 
@@ -1230,6 +1463,8 @@ model CashCollectionReceipt {
   createdById       Int?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   company     Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch      Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1240,6 +1475,8 @@ model CashCollectionReceipt {
 
   @@index([companyId, branchId, outletId])
   @@index([receiptDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_collection_receipts")
 }
 
@@ -1254,10 +1491,16 @@ model CashCollectionReceiptLine {
   remark           String? @db.VarChar(255)
   denominations    Json?
 
-  receipt  CashCollectionReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
-  currency Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  receipt      CashCollectionReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  currency     Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @default(now()) @updatedAt
 
   @@index([receiptId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("cash_collection_receipt_lines")
 }
 
@@ -1293,6 +1536,8 @@ model MainCashierPayment {
   createdById        Int?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
 
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1305,6 +1550,8 @@ model MainCashierPayment {
 
   @@index([companyId, branchId, outletId])
   @@index([paymentDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("main_cashier_payments")
 }
 
@@ -1329,6 +1576,8 @@ model MainCashierSettlement {
   createdById         Int?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+  createUserId        Int?
+  updateUserId        Int?
 
   company       Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch        Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1339,6 +1588,8 @@ model MainCashierSettlement {
 
   @@index([companyId, branchId, outletId])
   @@index([docDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("main_cashier_settlements")
 }
 
@@ -1355,10 +1606,16 @@ model MainCashierSettlementLine {
   baseTransferAmt Decimal @default(0) @db.Decimal(18, 2)
   denominations   Json?
 
-  settlement MainCashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
-  currency   Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  settlement   MainCashierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  currency     Currency              @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @default(now()) @updatedAt
 
   @@index([settlementId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("main_cashier_settlement_lines")
 }
 
@@ -1386,6 +1643,8 @@ model OutletBankDeposit {
   createdById           Int?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
+  createUserId          Int?
+  updateUserId          Int?
 
   company         Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch          Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1397,6 +1656,8 @@ model OutletBankDeposit {
 
   @@index([companyId, branchId])
   @@index([depositDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("outlet_bank_deposits")
 }
 
@@ -1410,10 +1671,16 @@ model OutletBankDepositItem {
   settledAmount    Decimal  @db.Decimal(18, 2)
   balance          Decimal  @default(0) @db.Decimal(18, 2)
 
-  bankDeposit OutletBankDeposit @relation(fields: [bankDepositId], references: [id], onDelete: Cascade)
-  cashDeposit CashDeposit?      @relation(fields: [cashDepositId], references: [id], onDelete: SetNull)
+  bankDeposit  OutletBankDeposit @relation(fields: [bankDepositId], references: [id], onDelete: Cascade)
+  cashDeposit  CashDeposit?      @relation(fields: [cashDepositId], references: [id], onDelete: SetNull)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @default(now()) @updatedAt
 
   @@index([bankDepositId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("outlet_bank_deposit_items")
 }
 
@@ -1438,6 +1705,8 @@ model BankReconciliation {
   reconciledById   Int?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+  createUserId     Int?
+  updateUserId     Int?
 
   company     Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch      Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1447,6 +1716,8 @@ model BankReconciliation {
 
   @@index([companyId, branchId, outletId])
   @@index([depositBankRefNo])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("bank_reconciliations")
 }
 
@@ -1484,6 +1755,8 @@ model PettyCashRequest {
   createdById       Int?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   company         Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch          Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1500,6 +1773,8 @@ model PettyCashRequest {
   @@index([departmentId])
   @@index([status])
   @@index([requestDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_requests")
 }
 
@@ -1540,6 +1815,8 @@ model PettyCashAdvance {
   createdById       Int?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   request         PettyCashRequest?         @relation(fields: [requestId], references: [id], onDelete: SetNull)
   company         Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -1558,6 +1835,8 @@ model PettyCashAdvance {
   @@index([requestId])
   @@index([status])
   @@index([docDate])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_advances")
 }
 
@@ -1591,22 +1870,26 @@ model PettyCashBillSubmission {
   createdById         Int?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
+  createUserId        Int?
+  updateUserId        Int?
 
-  company      Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  branch       Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  outlet       Outlet?                   @relation(fields: [outletId], references: [id], onDelete: SetNull)
-  department   Department?               @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  employee     Employee?                 @relation(fields: [employeeId], references: [id], onDelete: SetNull)
-  request      PettyCashRequest?         @relation(fields: [requestId], references: [id], onDelete: SetNull)
-  advance      PettyCashAdvance?         @relation(fields: [advanceId], references: [id], onDelete: SetNull)
-  lines        PettyCashBillLine[]
-  adjustments  PettyCashBillAdjustment[]
-  returns      PettyCashReturn[]
-  reimbItems   FloatReimbursementVoucher[]
+  company     Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch      Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet      Outlet?                     @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  department  Department?                 @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  employee    Employee?                   @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  request     PettyCashRequest?           @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  advance     PettyCashAdvance?           @relation(fields: [advanceId], references: [id], onDelete: SetNull)
+  lines       PettyCashBillLine[]
+  adjustments PettyCashBillAdjustment[]
+  returns     PettyCashReturn[]
+  reimbItems  FloatReimbursementVoucher[]
 
   @@index([companyId, branchId])
   @@index([advanceId])
   @@index([status])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_bill_submissions")
 }
 
@@ -1633,8 +1916,14 @@ model PettyCashBillLine {
   vendor          Vendor?                 @relation(fields: [vendorId], references: [id], onDelete: SetNull)
   expenseCategory ExpenseCategory?        @relation(fields: [expenseCategoryId], references: [id], onDelete: SetNull)
   currency        Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  createUserId    Int?
+  updateUserId    Int?
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @default(now()) @updatedAt
 
   @@index([billSubmissionId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_bill_lines")
 }
 
@@ -1650,8 +1939,14 @@ model PettyCashBillAdjustment {
   remark              String?   @db.VarChar(255)
 
   billSubmission PettyCashBillSubmission @relation(fields: [billSubmissionId], references: [id], onDelete: Cascade)
+  createUserId   Int?
+  updateUserId   Int?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @default(now()) @updatedAt
 
   @@index([billSubmissionId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_bill_adjustments")
 }
 
@@ -1686,6 +1981,8 @@ model PettyCashReturn {
   createdById       Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   company        Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch         Branch                   @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1698,6 +1995,8 @@ model PettyCashReturn {
 
   @@index([companyId, branchId])
   @@index([advanceId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_returns")
 }
 
@@ -1723,6 +2022,8 @@ model FloatReimbursement {
   createdById       Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   company      Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch       Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1732,6 +2033,8 @@ model FloatReimbursement {
 
   @@index([companyId, branchId])
   @@index([status])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("float_reimbursements")
 }
 
@@ -1750,8 +2053,14 @@ model FloatReimbursementVoucher {
 
   reimbursement  FloatReimbursement       @relation(fields: [reimbursementId], references: [id], onDelete: Cascade)
   billSubmission PettyCashBillSubmission? @relation(fields: [billSubmissionId], references: [id], onDelete: SetNull)
+  createUserId   Int?
+  updateUserId   Int?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @default(now()) @updatedAt
 
   @@index([reimbursementId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("float_reimbursement_vouchers")
 }
 
@@ -1774,12 +2083,16 @@ model PettyCashIOU {
   status            String   @default("Active Advance") @db.VarChar(60)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   advance  PettyCashAdvance? @relation(fields: [advanceId], references: [id], onDelete: SetNull)
   employee Employee?         @relation(fields: [employeeId], references: [id], onDelete: SetNull)
 
   @@index([employeeId])
   @@index([status])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("petty_cash_ious")
 }
 
@@ -1823,6 +2136,8 @@ model SalesReconciliation {
   updatedById         Int?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
+  createUserId        Int?
+  updateUserId        Int?
 
   company           Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch            Branch                    @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1836,6 +2151,8 @@ model SalesReconciliation {
   @@index([companyId, branchId, outletId])
   @@index([docDate])
   @@index([status])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("sales_reconciliations")
 }
 
@@ -1863,8 +2180,14 @@ model SalesReconciliationLine {
   paymentType           PaymentType?        @relation(fields: [paymentTypeId], references: [id], onDelete: SetNull)
   currency              Currency            @relation(fields: [currencyId], references: [id], onDelete: Restrict)
   autoFilledFromDeposit CashDeposit?        @relation(fields: [autoFilledFromDepositId], references: [id], onDelete: SetNull)
+  createUserId          Int?
+  updateUserId          Int?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @default(now()) @updatedAt
 
   @@index([reconciliationId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("sales_reconciliation_lines")
 }
 
@@ -1890,6 +2213,8 @@ model VarianceIncident {
   auditStatus        String   @default("Investigating") @db.VarChar(50)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
 
   reconciliation SalesReconciliation? @relation(fields: [reconciliationId], references: [id], onDelete: SetNull)
   company        Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -1900,6 +2225,8 @@ model VarianceIncident {
   @@index([companyId, outletId])
   @@index([incidentDate])
   @@index([type])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("variance_incidents")
 }
 
@@ -1917,11 +2244,15 @@ model ApprovalStage {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  createUserId Int?
+  updateUserId Int?
 
   approvers      ApprovalStageApprover[]
   templateStages ApprovalTemplateStage[]
   decisions      ApprovalDecision[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_stages")
 }
 
@@ -1931,11 +2262,17 @@ model ApprovalStageApprover {
   userId       Int
   maxLimitBase Decimal @default(10000) @db.Decimal(18, 2)
 
-  stage ApprovalStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
-  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stage        ApprovalStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
 
   @@unique([stageId, userId])
   @@index([stageId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_stage_approvers")
 }
 
@@ -1948,12 +2285,16 @@ model ApprovalTemplate {
   isActive          Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   stages      ApprovalTemplateStage[]
   originators ApprovalTemplateOriginator[]
   terms       ApprovalTemplateTerm[]
   instances   ApprovalInstance[]
 
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_templates")
 }
 
@@ -1963,11 +2304,17 @@ model ApprovalTemplateStage {
   stageId    Int
   stageOrder Int
 
-  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  stage    ApprovalStage    @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  template     ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  stage        ApprovalStage    @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @default(now()) @updatedAt
 
   @@unique([templateId, stageOrder])
   @@index([templateId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_template_stages")
 }
 
@@ -1976,10 +2323,16 @@ model ApprovalTemplateOriginator {
   templateId Int
   userId     Int
 
-  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template     ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @default(now()) @updatedAt
 
   @@unique([templateId, userId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_template_originators")
 }
 
@@ -1991,9 +2344,15 @@ model ApprovalTemplateTerm {
   value       String  @db.VarChar(120)
   description String? @db.VarChar(255)
 
-  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  template     ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @default(now()) @updatedAt
 
   @@index([templateId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_template_terms")
 }
 
@@ -2017,6 +2376,8 @@ model ApprovalInstance {
   completedAt       DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  createUserId      Int?
+  updateUserId      Int?
 
   template    ApprovalTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
   submittedBy User               @relation("ApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Restrict)
@@ -2025,6 +2386,8 @@ model ApprovalInstance {
   @@index([entityType, entityId])
   @@index([status])
   @@index([companyId, outletId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_instances")
 }
 
@@ -2038,10 +2401,60 @@ model ApprovalDecision {
   comment     String?  @db.Text
   decidedAt   DateTime @default(now())
 
-  instance  ApprovalInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
-  stage     ApprovalStage?   @relation(fields: [stageId], references: [id], onDelete: SetNull)
-  decidedBy User             @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+  instance     ApprovalInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  stage        ApprovalStage?   @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  decidedBy    User             @relation(fields: [decidedById], references: [id], onDelete: Restrict)
+  createUserId Int?
+  updateUserId Int?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @default(now()) @updatedAt
 
   @@index([instanceId])
+  @@index([createUserId])
+  @@index([updateUserId])
   @@map("approval_decisions")
+}
+
+// ============================================================================
+// 7. CENTRALIZED APPEND-ONLY CHANGE LOGS (FIELD-LEVEL AUDIT HISTORY)
+// ============================================================================
+
+enum ChangeLogAction {
+  CREATE
+  UPDATE
+  DELETE
+  CANCEL
+  APPROVE
+  REJECT
+  POST
+  REVERSE
+  CLOSE
+  REOPEN
+  STATUS_CHANGE
+}
+
+model ChangeLog {
+  id            Int             @id @default(autoincrement()) @map("Id")
+  userId        Int?            @map("UserId")
+  userName      String          @map("UserName") @db.VarChar(150)
+  action        ChangeLogAction @map("Action")
+  tableName     String          @map("TableName") @db.VarChar(100)
+  recordId      String          @map("RecordId") @db.VarChar(64)
+  recordCode    String?         @map("RecordCode") @db.VarChar(120)
+  oldValues     Json?           @map("OldValues") @db.JsonB
+  newValues     Json?           @map("NewValues") @db.JsonB
+  changedFields String[]        @default([]) @map("ChangedFields")
+  description   String          @map("Description") @db.VarChar(500)
+  ipAddress     String?         @map("IpAddress") @db.VarChar(64)
+  userAgent     String?         @map("UserAgent") @db.VarChar(500)
+  createdAt     DateTime        @default(now()) @map("CreatedAt") @db.Timestamptz(3)
+
+  user User? @relation("ChangeLogActor", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tableName, recordId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+  @@index([recordCode])
+  @@map("ChangeLogs")
 }

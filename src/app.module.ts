@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { validateEnv } from './config/env.validation';
 import { PrismaModule } from './database/prisma.module';
+import { ChangeLogModule } from './common/audit/audit.module';
 import { CommonServicesModule } from './common/services/common-services.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
@@ -44,6 +45,7 @@ import { ReportsModule } from './reports/reports.module';
       ],
     }),
     PrismaModule,
+    ChangeLogModule,
     CommonServicesModule,
     AuditModule,
     NotificationsModule,

@@ -1,12 +1,16 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Optional } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../common/decorators/auth.decorators';
+import { DatabaseService } from '../database/database.service';
 import { PrismaService } from '../database/prisma.service';
 
 @ApiTags('Health')
 @Controller('health')
 export class HealthController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly databaseService?: DatabaseService,
+  ) { }
 
   @Public()
   @Get()
@@ -21,11 +25,26 @@ export class HealthController {
     } catch {
       database = 'disconnected';
     }
+
+    let neonServerless = 'skipped';
+    let databaseName: string | undefined;
+    if (this.databaseService) {
+      try {
+        const ping = await this.databaseService.ping();
+        neonServerless = 'connected';
+        databaseName = ping.database;
+      } catch {
+        neonServerless = 'disconnected';
+      }
+    }
+
     return {
       status: database === 'connected' ? 'ok' : 'degraded',
       service: 'BNF Connect Cash Management System API',
       version: '1.0.0',
       database,
+      neonServerless,
+      ...(databaseName ? { databaseName } : {}),
       latencyMs,
       timestamp: new Date().toISOString(),
     };

@@ -54,8 +54,9 @@ describe('BusinessConfigService (System-Wide Base Currency Setup)', () => {
     const tx = {
       currency: {
         findUnique: jest.fn().mockResolvedValue({ id: 5, code: 'LKR', symbol: 'Rs', isActive: true }),
+        findMany: jest.fn().mockResolvedValue([{ id: 1, code: 'USD', isBase: true }]),
         updateMany: jest.fn(),
-        update: jest.fn(),
+        update: jest.fn().mockResolvedValue({ id: 5, code: 'LKR', symbol: 'Rs', isBase: true }),
       },
       company: { updateMany: jest.fn() },
       businessConfig: {
@@ -76,11 +77,18 @@ describe('BusinessConfigService (System-Wide Base Currency Setup)', () => {
 
     expect(result.currency.baseCurrency).toBe('LKR');
     expect(result.currency.baseSymbol).toBe('Rs');
-    expect(tx.currency.updateMany).toHaveBeenCalledWith({ data: { isBase: false } });
+    expect(tx.currency.updateMany).toHaveBeenCalledWith({
+      data: { isBase: false, updateUserId: adminUser.id },
+    });
     expect(tx.currency.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 5 }, data: expect.objectContaining({ isBase: true }) }),
+      expect.objectContaining({
+        where: { id: 5 },
+        data: expect.objectContaining({ isBase: true, updateUserId: adminUser.id }),
+      }),
     );
-    expect(tx.company.updateMany).toHaveBeenCalledWith({ data: { baseCurrencyCode: 'LKR' } });
+    expect(tx.company.updateMany).toHaveBeenCalledWith({
+      data: { baseCurrencyCode: 'LKR', updateUserId: adminUser.id },
+    });
   });
 
   it('rejects switching base currency to an unknown or inactive currency', async () => {

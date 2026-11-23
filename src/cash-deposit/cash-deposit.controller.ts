@@ -109,6 +109,35 @@ export class CashDepositController {
     return this.service.decideDeposit(user, id, dto);
   }
 
+  @Post('cash-deposits/:id/cancel')
+  @RequirePermission('cashDeposit', 'update')
+  @ApiOperation({ summary: 'Cancel a Draft/Submitted/Rejected Cash Collection slip with audit trail' })
+  cancelDeposit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body?: { reason?: string },
+  ) {
+    return this.service.cancelDeposit(user, id, body?.reason);
+  }
+
+  @Post('cash-deposits/:id/post')
+  @RequirePermission('cashDeposit', 'approve')
+  @ApiOperation({ summary: 'Post an Approved Cash Collection slip to General Ledger' })
+  postDeposit(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseIntPipe) id: number) {
+    return this.service.postDeposit(user, id);
+  }
+
+  @Post('cash-deposits/:id/reverse')
+  @RequirePermission('cashDeposit', 'unblock')
+  @ApiOperation({ summary: 'Reverse a Posted Cash Collection slip with mandatory audit trail' })
+  reverseDeposit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body?: { reason?: string },
+  ) {
+    return this.service.reverseDeposit(user, id, body?.reason);
+  }
+
   // ---- Screen 02: Cashier Payment ----
   @Get('cash-deposit/payments')
   @RequirePermission('cashDeposit', 'read')

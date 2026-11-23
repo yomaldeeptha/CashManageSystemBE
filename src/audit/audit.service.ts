@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { getEffectiveScope } from '../common/utils/scope.util';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
@@ -28,7 +29,8 @@ export class AuditService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly fxResolver: ExchangeRateResolverService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   async log(input: LogAuditInput): Promise<void> {
     const db = input.tx || this.prisma;
@@ -247,30 +249,49 @@ export class AuditService {
     const countToday = await this.prisma.auditExportBatch.count();
     const batchCode = `AUDIT-${dateStamp}-${String(countToday + 1).padStart(3, '0')}`;
 
-    const batch = await this.prisma.auditExportBatch.create({
-      data: {
-        batchCode,
-        format: dto.format,
-        recordCount: staged.recordCount,
-        totalBaseAmount: toPrismaDecimal(staged.totalBaseAmount),
-        baseCurrency: staged.baseCurrency,
-        exportedById: user.id,
-        payloadSummary: {
-          categories: ['Cash Deposit', 'Petty Cash Advance', 'Shift Reconciliation'],
-          docNos: staged.records.map((r) => r.docNo),
+    const batch = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.auditExportBatch.create({
+        data: {
+          batchCode,
+          format: dto.format,
+          recordCount: staged.recordCount,
+          totalBaseAmount: toPrismaDecimal(staged.totalBaseAmount),
+          baseCurrency: staged.baseCurrency,
+          exportedById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
+          payloadSummary: {
+            categories: ['Cash Deposit', 'Petty Cash Advance', 'Shift Reconciliation'],
+            docNos: staged.records.map((r) => r.docNo),
+          },
         },
-      },
-    });
+      });
 
-    await this.log({
-      entityType: 'audit_export_batch',
-      entityId: batch.id,
-      docNo: batchCode,
-      action: 'EXPORT',
-      step: `Generated ${dto.format} Audit Ledger Export (${staged.recordCount} records)`,
-      toStatus: 'Exported',
-      performedById: user.id,
-      performedByName: user.fullName,
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'AuditExportBatch',
+          recordId: created.id,
+          recordCode: created.batchCode,
+          newValues: created,
+          description: `Generated ${dto.format} Audit Ledger Export (${staged.recordCount} records)`,
+          actor: user,
+          tx,
+        });
+      }
+
+      await this.log({
+        entityType: 'audit_export_batch',
+        entityId: created.id,
+        docNo: batchCode,
+        action: 'EXPORT',
+        step: `Generated ${dto.format} Audit Ledger Export (${staged.recordCount} records)`,
+        toStatus: 'Exported',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
+
+      return created;
     });
 
     let content: string;

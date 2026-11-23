@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -8,6 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { PrismaService } from '../database/prisma.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import {
   AuthenticatedUser,
   RolePermissionMap,
@@ -26,7 +28,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   hashRefreshToken(token: string): string {
     return crypto.createHash('sha256').update(token).digest('hex');
@@ -331,28 +334,41 @@ export class AuthService {
     }
 
     const newHash = await this.hashPassword(dto.newPassword);
-    await this.prisma.$transaction([
-      this.prisma.user.update({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
         where: { id: user.id },
         data: {
           passwordHash: newHash,
           isTemporaryPassword: false,
           requireChangeOnLogin: false,
+          updateUserId: user.id,
         },
-      }),
-      this.prisma.refreshToken.updateMany({
+      });
+      await tx.refreshToken.updateMany({
         where: { userId: user.id, revokedAt: null },
         data: { revokedAt: new Date() },
-      }),
-    ]);
-
-    await this.auditService.log({
-      entityType: 'user',
-      entityId: user.id,
-      action: 'PASSWORD_CHANGED',
-      step: 'User Updated Account Password',
-      performedById: user.id,
-      performedByName: user.fullName,
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'User',
+          recordId: user.id,
+          recordCode: user.username,
+          newValues: { isTemporaryPassword: false, requireChangeOnLogin: false },
+          description: `User ${user.username} updated account password (credentials redacted)`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'user',
+        entityId: user.id,
+        action: 'PASSWORD_CHANGED',
+        step: 'User Updated Account Password',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
     });
 
     return { updated: true };

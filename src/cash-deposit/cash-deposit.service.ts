@@ -2,11 +2,13 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
@@ -40,6 +42,7 @@ export class CashDepositService {
     private readonly approvalsService: ApprovalsService,
     private readonly fxResolver: ExchangeRateResolverService,
     private readonly numberSeries: NumberSeriesGeneratorService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   private async getCurrencyByCode(code: string) {
@@ -311,6 +314,8 @@ export class CashDepositService {
           remark: dto.remark || '',
           createdById: user.id,
           updatedById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
 
@@ -321,6 +326,8 @@ export class CashDepositService {
           amount: toPrismaDecimal(l.amount),
           exRate: toPrismaRate(l.rate),
           baseAmount: toPrismaDecimal(l.baseAmount),
+          createUserId: user.id,
+          updateUserId: user.id,
         })),
       });
 
@@ -337,6 +344,8 @@ export class CashDepositService {
                 currencyId: cur.id,
                 denominationValue: toPrismaDecimal(denomVal),
                 noteCount: count,
+                createUserId: user.id,
+                updateUserId: user.id,
               });
             }
           }
@@ -344,6 +353,17 @@ export class CashDepositService {
         if (denomRows.length > 0) {
           await tx.cashDepositDenomination.createMany({ data: denomRows });
         }
+      }
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'CashDeposit',
+          recordId: dep.id,
+          recordCode: dep.docNo,
+          newValues: { ...dep, currencies: resolvedLines },
+          actor: user,
+          tx,
+        });
       }
 
       if (status === 'Submitted') {
@@ -394,10 +414,23 @@ export class CashDepositService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.cashDeposit.update({
+      const next = await tx.cashDeposit.update({
         where: { id },
-        data: { status: 'Submitted', updatedById: user.id },
+        data: { status: 'Submitted', updatedById: user.id, updateUserId: user.id },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'CashDeposit',
+          recordId: id,
+          recordCode: dep.docNo,
+          oldValues: dep,
+          newValues: next,
+          description: `Submitted Cash Collection Slip ${dep.docNo} for Maker-Checker Review`,
+          actor: user,
+          tx,
+        });
+      }
       await this.approvalsService.initiateApproval({
         entityType: 'cash_deposit',
         documentKey: 'cashCollectionDeposit',
@@ -426,6 +459,143 @@ export class CashDepositService {
       });
     });
 
+    return this.getDeposit(user, id);
+  }
+
+  async cancelDeposit(user: AuthenticatedUser, id: number, reason?: string) {
+    const dep = await this.prisma.cashDeposit.findUnique({ where: { id } });
+    if (!dep) throw new NotFoundException(`Cash Deposit #${id} not found.`);
+    await assertEntityScope(this.prisma, user, dep);
+    if (['Posted', 'Cancelled', 'Reversed'].includes(dep.status)) {
+      throw new BadRequestException(`Cannot cancel Cash Deposit in status "${dep.status}".`);
+    }
+    const note = reason?.trim() || 'Cancelled by authorized user';
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.cashDeposit.update({
+        where: { id },
+        data: {
+          status: 'Cancelled',
+          remark: `${dep.remark ? `${dep.remark} | ` : ''}Cancelled: ${note}`,
+          updatedById: user.id,
+          updateUserId: user.id,
+        },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'CANCEL',
+          tableName: 'CashDeposit',
+          recordId: id,
+          recordCode: dep.docNo,
+          oldValues: dep,
+          newValues: next,
+          description: `Cancelled Cash Deposit ${dep.docNo}: ${note}`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'cash_deposit',
+        entityId: id,
+        docNo: dep.docNo,
+        action: 'CANCEL',
+        step: `Cancelled Cash Deposit ${dep.docNo}`,
+        fromStatus: dep.status,
+        toStatus: 'Cancelled',
+        performedById: user.id,
+        performedByName: user.fullName,
+        remarks: note,
+        tx,
+      });
+    });
+    return this.getDeposit(user, id);
+  }
+
+  async postDeposit(user: AuthenticatedUser, id: number) {
+    const dep = await this.prisma.cashDeposit.findUnique({ where: { id } });
+    if (!dep) throw new NotFoundException(`Cash Deposit #${id} not found.`);
+    await assertEntityScope(this.prisma, user, dep);
+    if (dep.status !== 'Approved') {
+      throw new BadRequestException(`Only Approved Cash Deposits can be posted (current: "${dep.status}").`);
+    }
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.cashDeposit.update({
+        where: { id },
+        data: { status: 'Posted', updatedById: user.id, updateUserId: user.id },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'POST',
+          tableName: 'CashDeposit',
+          recordId: id,
+          recordCode: dep.docNo,
+          oldValues: dep,
+          newValues: next,
+          description: `Posted Cash Deposit ${dep.docNo} to General Ledger`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'cash_deposit',
+        entityId: id,
+        docNo: dep.docNo,
+        action: 'POST',
+        step: `Posted Cash Deposit ${dep.docNo} to General Ledger`,
+        fromStatus: dep.status,
+        toStatus: 'Posted',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
+    });
+    return this.getDeposit(user, id);
+  }
+
+  async reverseDeposit(user: AuthenticatedUser, id: number, reason?: string) {
+    const dep = await this.prisma.cashDeposit.findUnique({ where: { id } });
+    if (!dep) throw new NotFoundException(`Cash Deposit #${id} not found.`);
+    await assertEntityScope(this.prisma, user, dep);
+    if (dep.status !== 'Posted') {
+      throw new BadRequestException(`Only Posted Cash Deposits can be reversed (current: "${dep.status}").`);
+    }
+    const note = reason?.trim() || 'Reversed by Finance Controller';
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.cashDeposit.update({
+        where: { id },
+        data: {
+          status: 'Reversed',
+          remark: `${dep.remark ? `${dep.remark} | ` : ''}Reversed: ${note}`,
+          updatedById: user.id,
+          updateUserId: user.id,
+        },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'REVERSE',
+          tableName: 'CashDeposit',
+          recordId: id,
+          recordCode: dep.docNo,
+          oldValues: dep,
+          newValues: next,
+          description: `Reversed Posted Cash Deposit ${dep.docNo}: ${note}`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'cash_deposit',
+        entityId: id,
+        docNo: dep.docNo,
+        action: 'REVERSE',
+        step: `Reversed Cash Deposit ${dep.docNo}`,
+        fromStatus: dep.status,
+        toStatus: 'Reversed',
+        performedById: user.id,
+        performedByName: user.fullName,
+        remarks: note,
+        tx,
+      });
+    });
     return this.getDeposit(user, id);
   }
 
@@ -529,10 +699,22 @@ export class CashDepositService {
           );
         }
         balanceAfter = currentBal.minus(toDecimal(dto.amount));
-        await tx.floatAccount.update({
+        const updatedFloat = await tx.floatAccount.update({
           where: { id: floatAcc.id },
-          data: { currentBalance: toPrismaDecimal(balanceAfter) },
+          data: { currentBalance: toPrismaDecimal(balanceAfter), updateUserId: user.id },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'FloatAccount',
+            recordId: floatAcc.id,
+            recordCode: floatAcc.code,
+            oldValues: floatAcc,
+            newValues: updatedFloat,
+            description: `Deducted ${cur.code} ${dto.amount} for Cashier Payment`,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       const docNo =
@@ -581,9 +763,22 @@ export class CashDepositService {
           approvalStatus: dto.approvalStatus || 'Submitted',
           approvedByName: 'Pending Checker Audit',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
         include: { company: true, branch: true, outlet: true, currency: true },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'CashierPayment',
+          recordId: payment.id,
+          recordCode: payment.docNo,
+          newValues: payment,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'cashier_payment',
@@ -815,6 +1010,8 @@ export class CashDepositService {
           narration: dto.narration || '',
           status: dto.status || 'Pending Acceptance',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
 
@@ -830,8 +1027,21 @@ export class CashDepositService {
           exRate: toPrismaRate(l.rate),
           baseTransferAmt: toPrismaDecimal(l.baseTransfer),
           denominations: l.denominations,
+          createUserId: user.id,
+          updateUserId: user.id,
         })),
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'CashierSettlement',
+          recordId: settlement.id,
+          recordCode: settlement.docNo,
+          newValues: settlement,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'cashier_settlement',
@@ -861,14 +1071,28 @@ export class CashDepositService {
     }
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.cashierSettlement.update({
+      const next = await tx.cashierSettlement.update({
         where: { id },
         data: {
           status: 'Accepted & Settled',
           acceptedById: user.id,
           acceptedAt: new Date(),
+          updateUserId: user.id,
         },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'APPROVE',
+          tableName: 'CashierSettlement',
+          recordId: id,
+          recordCode: settlement.docNo,
+          oldValues: settlement,
+          newValues: next,
+          description: `Treasury accepted & settled handover ${settlement.docNo}`,
+          actor: user,
+          tx,
+        });
+      }
       await this.auditService.log({
         entityType: 'cashier_settlement',
         entityId: id,
@@ -1035,6 +1259,8 @@ export class CashDepositService {
           postedByName: user.fullName,
           narration: dto.narration || '',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
 
@@ -1048,8 +1274,23 @@ export class CashDepositService {
           exRate: toPrismaRate(l.rate),
           remark: l.remark,
           denominations: l.denominations,
+          createUserId: user.id,
+          updateUserId: user.id,
         })),
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'POST',
+          tableName: 'CashCollectionReceipt',
+          recordId: receipt.id,
+          recordCode: receipt.receiptVoucherNo,
+          newValues: receipt,
+          description: `Posted Main Cash Collection Receipt ${receipt.receiptVoucherNo}`,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'cash_collection_receipt',
@@ -1156,13 +1397,26 @@ export class CashDepositService {
           );
         }
         balanceAfter = balanceAfter.minus(toDecimal(dto.amount));
-        await tx.floatAccount.update({
+        const updatedFloat = await tx.floatAccount.update({
           where: { id: floatAcc.id },
-          data: { currentBalance: toPrismaDecimal(balanceAfter) },
+          data: { currentBalance: toPrismaDecimal(balanceAfter), updateUserId: user.id },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'FloatAccount',
+            recordId: floatAcc.id,
+            recordCode: floatAcc.code,
+            oldValues: floatAcc,
+            newValues: updatedFloat,
+            description: `Deducted ${cur.code} ${dto.amount} for Cashier Payment`,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       if (editId) {
+        const oldMainPay = await tx.mainCashierPayment.findUnique({ where: { id: editId } });
         const updated = await tx.mainCashierPayment.update({
           where: { id: editId },
           data: {
@@ -1185,8 +1439,20 @@ export class CashDepositService {
             receiptNumber: dto.receiptNumber || null,
             narration: dto.narration || '',
             denominations: (dto.denominations || {}) as Prisma.InputJsonValue,
+            updateUserId: user.id,
           },
         });
+        if (this.changeLogService && oldMainPay) {
+          await this.changeLogService.logUpdate({
+            tableName: 'MainCashierPayment',
+            recordId: updated.id,
+            recordCode: updated.docNo,
+            oldValues: oldMainPay,
+            newValues: updated,
+            actor: user,
+            tx,
+          });
+        }
         await this.auditService.log({
           entityType: 'main_cashier_payment',
           entityId: updated.id,
@@ -1245,8 +1511,21 @@ export class CashDepositService {
           narration: dto.narration || '',
           denominations: (dto.denominations || {}) as Prisma.InputJsonValue,
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'MainCashierPayment',
+          recordId: created.id,
+          recordCode: created.docNo,
+          newValues: created,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'main_cashier_payment',
@@ -1388,6 +1667,7 @@ export class CashDepositService {
       let docNo = dto.docNo || '';
 
       if (editId) {
+        const oldMainSet = await tx.mainCashierSettlement.findUnique({ where: { id: editId } });
         const updated = await tx.mainCashierSettlement.update({
           where: { id: editId },
           data: {
@@ -1405,10 +1685,22 @@ export class CashDepositService {
             totalTransferBase: toPrismaDecimal(totalTransferBase),
             narration: dto.narration || '',
             status: dto.status === 'Draft' ? 'Submitted' : dto.status || 'Submitted',
+            updateUserId: user.id,
           },
         });
         docNo = updated.docNo;
         await tx.mainCashierSettlementLine.deleteMany({ where: { settlementId: editId } });
+        if (this.changeLogService && oldMainSet) {
+          await this.changeLogService.logUpdate({
+            tableName: 'MainCashierSettlement',
+            recordId: updated.id,
+            recordCode: updated.docNo,
+            oldValues: oldMainSet,
+            newValues: updated,
+            actor: user,
+            tx,
+          });
+        }
       } else {
         docNo =
           dto.docNo && !(await tx.mainCashierSettlement.findUnique({ where: { docNo: dto.docNo } }))
@@ -1436,9 +1728,21 @@ export class CashDepositService {
             narration: dto.narration || '',
             status: dto.status === 'Draft' ? 'Submitted' : dto.status || 'Submitted',
             createdById: user.id,
+            createUserId: user.id,
+            updateUserId: user.id,
           },
         });
         settlementId = created.id;
+        if (this.changeLogService) {
+          await this.changeLogService.logCreate({
+            tableName: 'MainCashierSettlement',
+            recordId: created.id,
+            recordCode: created.docNo,
+            newValues: created,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       await tx.mainCashierSettlementLine.createMany({
@@ -1623,8 +1927,23 @@ export class CashDepositService {
           status,
           remark: dto.remark || '',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'POST',
+          tableName: 'OutletBankDeposit',
+          recordId: bankDep.id,
+          recordCode: bankDep.docNo,
+          newValues: bankDep,
+          description: `Posted ${status} ${bankDep.docNo} (${cur.code} ${toNumber(totalAmount)})`,
+          actor: user,
+          tx,
+        });
+      }
 
       if (linkedDeposits.length > 0) {
         await tx.outletBankDepositItem.createMany({
@@ -1636,19 +1955,36 @@ export class CashDepositService {
             collectionAmount: ld.totalBaseAmount,
             settledAmount: ld.totalBaseAmount,
             balance: toPrismaDecimal(0),
+            createUserId: user.id,
+            updateUserId: user.id,
           })),
         });
         if (isBank) {
           await tx.cashDeposit.updateMany({
             where: { id: { in: linkedDeposits.map((d) => d.id) } },
-            data: { status: 'Posted' },
+            data: { status: 'Posted', updateUserId: user.id },
           });
+          if (this.changeLogService) {
+            for (const ld of linkedDeposits) {
+              await this.changeLogService.logAction({
+                action: 'POST',
+                tableName: 'CashDeposit',
+                recordId: ld.id,
+                recordCode: ld.docNo,
+                oldValues: { status: ld.status },
+                newValues: { status: 'Posted' },
+                description: `Posted via Outlet Bank Deposit ${bankDep.docNo}`,
+                actor: user,
+                tx,
+              });
+            }
+          }
         }
       }
 
       if (isBank && scope.outletId) {
         const recCount = await tx.bankReconciliation.count();
-        await tx.bankReconciliation.create({
+        const brec = await tx.bankReconciliation.create({
           data: {
             docCode: `BREC-2026-${String(recCount + 1).padStart(3, '0')}`,
             companyId: scope.companyId,
@@ -1664,8 +2000,20 @@ export class CashDepositService {
             variance: toPrismaDecimal(totalAmount.negated()),
             status: 'Pending Statement Match',
             matchingMethod: 'Awaiting Bank Statement',
+            createUserId: user.id,
+            updateUserId: user.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logCreate({
+            tableName: 'BankReconciliation',
+            recordId: brec.id,
+            recordCode: brec.docCode,
+            newValues: brec,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       await this.auditService.log({
@@ -1739,7 +2087,7 @@ export class CashDepositService {
         const variance = roundMoney(stmtAmt.minus(toDecimal(existing.settledAmount)));
         const isMatched = variance.abs().lt(0.01);
 
-        await tx.bankReconciliation.update({
+        const nextBrec = await tx.bankReconciliation.update({
           where: { id: existing.id },
           data: {
             statementDate: parseDateOnly(row.statementDate),
@@ -1749,8 +2097,20 @@ export class CashDepositService {
             status: isMatched ? 'Auto-Matched & Cleared' : 'Variance Flagged',
             matchingMethod: 'Statement Import Auto-Match',
             reconciledById: user.id,
+            updateUserId: user.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'BankReconciliation',
+            recordId: existing.id,
+            recordCode: existing.docCode,
+            oldValues: existing,
+            newValues: nextBrec,
+            actor: user,
+            tx,
+          });
+        }
 
         if (isMatched) matchedCount += 1;
         else varianceCount += 1;

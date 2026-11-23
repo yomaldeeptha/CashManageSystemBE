@@ -597,6 +597,24 @@ async function main() {
     groupMap.set(grp.userGroupId, grp.id);
   }
 
+  // 25a. Non-loginable System Automated Process Actor (used for background jobs & audit backfill)
+  await prisma.user.upsert({
+    where: { username: 'system' },
+    update: { isActive: false },
+    create: {
+      username: 'system',
+      fullName: 'System Automated Process',
+      email: 'system@bnf-cms.internal',
+      passwordHash: '!SYSTEM_NON_LOGINABLE_ACCOUNT!',
+      empNo: 'SYS-000',
+      designation: 'Automated System Actor',
+      avatar: 'SY',
+      roleId: roleMap.get('ADM')!,
+      userGroupId: groupMap.get('UG-ADM-06')!,
+      isActive: false,
+    },
+  });
+
   // 25. Users (6 Demo Accounts with strong bcrypt cost-12 hashes)
   const usersSeed = [
     {

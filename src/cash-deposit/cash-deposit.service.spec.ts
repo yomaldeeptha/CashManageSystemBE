@@ -225,7 +225,7 @@ describe('CashDepositService', () => {
 
     expect(txMock.cashDeposit.updateMany).toHaveBeenCalledWith({
       where: { id: { in: [10] } },
-      data: { status: 'Posted' },
+      data: { status: 'Posted', updateUserId: outletCashier.id },
     });
     expect(txMock.bankReconciliation.create).toHaveBeenCalled();
     expect(res?.status).toBe('Completed Deposit');

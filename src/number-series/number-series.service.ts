@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { SaveFormMasterDto, SaveNumberSeriesDto } from './dto/number-series.dto';
@@ -11,6 +12,7 @@ export class NumberSeriesService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly generator: NumberSeriesGeneratorService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   private serializeSeries(s: {
@@ -104,9 +106,22 @@ export class NumberSeriesService {
           isDefault: Boolean(dto.isDefault),
           isLocked: Boolean(dto.isLocked),
           status: dto.isLocked ? 'Locked' : 'Active',
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
         include: { formMaster: true, branch: true },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'NumberSeries',
+          recordId: s.id,
+          recordCode: s.seriesId,
+          newValues: s,
+          actor,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'number_series',
@@ -159,9 +174,21 @@ export class NumberSeriesService {
           isDefault: dto.isDefault ?? existing.isDefault,
           isLocked: dto.isLocked ?? existing.isLocked,
           status: (dto.isLocked ?? existing.isLocked) ? 'Locked' : 'Active',
+          updateUserId: actor.id,
         },
         include: { formMaster: true, branch: true },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'NumberSeries',
+          recordId: s.id,
+          recordCode: s.seriesId,
+          oldValues: existing,
+          newValues: s,
+          actor,
+          tx,
+        });
+      }
       await this.auditService.log({
         entityType: 'number_series',
         entityId: s.id,
@@ -179,67 +206,111 @@ export class NumberSeriesService {
   }
 
   async deleteSeries(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.numberSeries.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
-    if (existing.isLocked) {
-      throw new BadRequestException('Unlock this series before deleting it.');
-    }
-    await this.prisma.numberSeries.delete({ where: { id } });
-    await this.auditService.log({
-      entityType: 'number_series',
-      entityId: id,
-      docNo: existing.seriesId,
-      action: 'DELETE',
-      step: `Deleted Number Series ${existing.seriesName}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.numberSeries.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
+      if (existing.isLocked) {
+        throw new BadRequestException('Unlock this series before deleting it.');
+      }
+      await tx.numberSeries.delete({ where: { id } });
+      if (this.changeLogService) {
+        await this.changeLogService.logDelete({
+          tableName: 'NumberSeries',
+          recordId: id,
+          recordCode: existing.seriesId,
+          oldValues: existing,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'number_series',
+        entityId: id,
+        docNo: existing.seriesId,
+        action: 'DELETE',
+        step: `Deleted Number Series ${existing.seriesName}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     return { deleted: true, id };
   }
 
   async toggleLock(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.numberSeries.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
-    const nextLocked = !existing.isLocked;
-    const updated = await this.prisma.numberSeries.update({
-      where: { id },
-      data: { isLocked: nextLocked, status: nextLocked ? 'Locked' : 'Active' },
-      include: { formMaster: true, branch: true },
-    });
-    await this.auditService.log({
-      entityType: 'number_series',
-      entityId: id,
-      docNo: existing.seriesId,
-      action: nextLocked ? 'LOCK' : 'UNLOCK',
-      step: `${nextLocked ? 'Locked' : 'Unlocked'} Number Series ${existing.seriesName}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.numberSeries.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
+      const nextLocked = !existing.isLocked;
+      const next = await tx.numberSeries.update({
+        where: { id },
+        data: { isLocked: nextLocked, status: nextLocked ? 'Locked' : 'Active', updateUserId: actor.id },
+        include: { formMaster: true, branch: true },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: nextLocked ? 'CLOSE' : 'REOPEN',
+          tableName: 'NumberSeries',
+          recordId: id,
+          recordCode: existing.seriesId,
+          oldValues: { isLocked: existing.isLocked, status: existing.status },
+          newValues: { isLocked: next.isLocked, status: next.status },
+          description: `${nextLocked ? 'Locked' : 'Unlocked'} Number Series ${existing.seriesName}`,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'number_series',
+        entityId: id,
+        docNo: existing.seriesId,
+        action: nextLocked ? 'LOCK' : 'UNLOCK',
+        step: `${nextLocked ? 'Locked' : 'Unlocked'} Number Series ${existing.seriesName}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
+      return next;
     });
     return this.serializeSeries(updated);
   }
 
   async setDefault(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.numberSeries.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
     const updated = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.numberSeries.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
       await tx.numberSeries.updateMany({
         where: { formId: existing.formId },
-        data: { isDefault: false },
+        data: { isDefault: false, updateUserId: actor.id },
       });
-      return tx.numberSeries.update({
+      const next = await tx.numberSeries.update({
         where: { id },
-        data: { isDefault: true },
+        data: { isDefault: true, updateUserId: actor.id },
         include: { formMaster: true, branch: true },
       });
-    });
-    await this.auditService.log({
-      entityType: 'number_series',
-      entityId: id,
-      docNo: existing.seriesId,
-      action: 'SET_DEFAULT',
-      step: `Set ${existing.seriesName} as default series for ${existing.formId}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'NumberSeries',
+          recordId: id,
+          recordCode: existing.seriesId,
+          oldValues: existing,
+          newValues: next,
+          description: `Set ${existing.seriesName} as default series for ${existing.formId}`,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'number_series',
+        entityId: id,
+        docNo: existing.seriesId,
+        action: 'SET_DEFAULT',
+        step: `Set ${existing.seriesName} as default series for ${existing.formId}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
+      return next;
     });
     return this.serializeSeries(updated);
   }
@@ -300,6 +371,7 @@ export class NumberSeriesService {
     const isActive = dto.status ? dto.status === 'Active' : true;
 
     const saved = await this.prisma.$transaction(async (tx) => {
+      const existingForm = await tx.formMaster.findUnique({ where: { formId } });
       const form = await tx.formMaster.upsert({
         where: { formId },
         create: {
@@ -315,6 +387,8 @@ export class NumberSeriesService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           description: dto.description || '',
           isActive,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
         update: {
           formName: dto.formName.trim(),
@@ -328,8 +402,32 @@ export class NumberSeriesService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           description: dto.description || '',
           isActive,
+          updateUserId: actor.id,
         },
       });
+
+      if (this.changeLogService) {
+        if (existingForm) {
+          await this.changeLogService.logUpdate({
+            tableName: 'FormMaster',
+            recordId: form.id,
+            recordCode: form.formId,
+            oldValues: existingForm,
+            newValues: form,
+            actor,
+            tx,
+          });
+        } else {
+          await this.changeLogService.logCreate({
+            tableName: 'FormMaster',
+            recordId: form.id,
+            recordCode: form.formId,
+            newValues: form,
+            actor,
+            tx,
+          });
+        }
+      }
 
       if (dto.screenId) {
         const screenId = dto.screenId.trim().toUpperCase();

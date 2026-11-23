@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
@@ -9,6 +10,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -33,6 +35,7 @@ export class AttachmentsService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly auditService: AuditService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {
     this.uploadRoot = path.resolve(
       process.cwd(),
@@ -91,31 +94,49 @@ export class AttachmentsService {
     const storagePath = path.join(this.uploadRoot, storedName);
     await fs.promises.writeFile(storagePath, file.buffer);
 
-    const record = await this.prisma.documentAttachment.create({
-      data: {
+    const record = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.documentAttachment.create({
+        data: {
+          entityType: body.entityType,
+          entityId: Number(body.entityId),
+          lineRef: body.lineRef || null,
+          fileName: path.basename(file.originalname),
+          storedName,
+          mimeType: file.mimetype,
+          fileSizeBytes: file.size,
+          fileSizeLabel: this.formatSize(file.size),
+          docType: body.docType || this.classifyDocType(file.mimetype),
+          remark: body.remark || '',
+          storagePath,
+          uploadedById: user.id,
+          uploadedByName: user.fullName,
+          createUserId: user.id,
+          updateUserId: user.id,
+        },
+      });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'DocumentAttachment',
+          recordId: created.id,
+          recordCode: created.fileName,
+          newValues: created,
+          actor: user,
+          tx,
+        });
+      }
+
+      await this.auditService.log({
         entityType: body.entityType,
         entityId: Number(body.entityId),
-        lineRef: body.lineRef || null,
-        fileName: path.basename(file.originalname),
-        storedName,
-        mimeType: file.mimetype,
-        fileSizeBytes: file.size,
-        fileSizeLabel: this.formatSize(file.size),
-        docType: body.docType || this.classifyDocType(file.mimetype),
-        remark: body.remark || '',
-        storagePath,
-        uploadedById: user.id,
-        uploadedByName: user.fullName,
-      },
-    });
+        action: 'ATTACH_FILE',
+        step: `Uploaded attachment ${created.fileName}`,
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
 
-    await this.auditService.log({
-      entityType: body.entityType,
-      entityId: Number(body.entityId),
-      action: 'ATTACH_FILE',
-      step: `Uploaded attachment ${record.fileName}`,
-      performedById: user.id,
-      performedByName: user.fullName,
+      return created;
     });
 
     return this.serialize(record);
@@ -171,28 +192,57 @@ export class AttachmentsService {
   }
 
   async updateRemark(id: number, remark: string) {
-    const updated = await this.prisma.documentAttachment.update({
-      where: { id },
-      data: { remark },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.documentAttachment.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Attachment #${id} not found.`);
+      const next = await tx.documentAttachment.update({
+        where: { id },
+        data: { remark, ...(this.changeLogService ? this.changeLogService.stampUpdate() : {}) },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'DocumentAttachment',
+          recordId: id,
+          recordCode: next.fileName,
+          oldValues: existing,
+          newValues: next,
+          tx,
+        });
+      }
+      return next;
     });
     return this.serialize(updated);
   }
 
   async remove(user: AuthenticatedUser, id: number) {
-    const record = await this.prisma.documentAttachment.findUnique({ where: { id } });
-    if (!record) throw new NotFoundException(`Attachment #${id} not found.`);
-    await this.prisma.documentAttachment.delete({ where: { id } });
+    const record = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.documentAttachment.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Attachment #${id} not found.`);
+      await tx.documentAttachment.delete({ where: { id } });
+      if (this.changeLogService) {
+        await this.changeLogService.logDelete({
+          tableName: 'DocumentAttachment',
+          recordId: id,
+          recordCode: existing.fileName,
+          oldValues: existing,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: existing.entityType,
+        entityId: existing.entityId,
+        action: 'DELETE_ATTACHMENT',
+        step: `Removed attachment ${existing.fileName}`,
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
+      return existing;
+    });
     if (fs.existsSync(record.storagePath)) {
       await fs.promises.unlink(record.storagePath).catch(() => undefined);
     }
-    await this.auditService.log({
-      entityType: record.entityType,
-      entityId: record.entityId,
-      action: 'DELETE_ATTACHMENT',
-      step: `Removed attachment ${record.fileName}`,
-      performedById: user.id,
-      performedByName: user.fullName,
-    });
     return { deleted: true, id };
   }
 }

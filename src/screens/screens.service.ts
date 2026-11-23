@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import {
   CopyScreenAuthDto,
@@ -13,7 +14,8 @@ export class ScreensService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   async listScreens() {
     const rows = await this.prisma.screen.findMany({ orderBy: { id: 'asc' } });
@@ -42,6 +44,7 @@ export class ScreensService {
     const isActive = dto.status ? dto.status === 'Active' : true;
 
     const saved = await this.prisma.$transaction(async (tx) => {
+      const existingScreen = await tx.screen.findUnique({ where: { screenId } });
       // Ensure FormMaster exists for referential integrity
       await tx.formMaster.upsert({
         where: { formId },
@@ -58,6 +61,8 @@ export class ScreensService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           description: dto.description || '',
           isActive,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
         update: {
           formName: dto.screenName.trim(),
@@ -67,6 +72,7 @@ export class ScreensService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           description: dto.description || '',
           isActive,
+          updateUserId: actor.id,
         },
       });
 
@@ -83,6 +89,8 @@ export class ScreensService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           supportedActions: dto.supportedActions || ['view', 'create', 'edit', 'approve', 'export'],
           isActive,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
         update: {
           formId,
@@ -94,8 +102,32 @@ export class ScreensService {
           makerCheckerType: dto.makerCheckerType || 'Standard',
           supportedActions: dto.supportedActions || ['view', 'create', 'edit', 'approve', 'export'],
           isActive,
+          updateUserId: actor.id,
         },
       });
+
+      if (this.changeLogService) {
+        if (existingScreen) {
+          await this.changeLogService.logUpdate({
+            tableName: 'Screen',
+            recordId: screen.id,
+            recordCode: screen.screenId,
+            oldValues: existingScreen,
+            newValues: screen,
+            actor,
+            tx,
+          });
+        } else {
+          await this.changeLogService.logCreate({
+            tableName: 'Screen',
+            recordId: screen.id,
+            recordCode: screen.screenId,
+            newValues: screen,
+            actor,
+            tx,
+          });
+        }
+      }
 
       await this.auditService.log({
         entityType: 'screen',
@@ -185,32 +217,65 @@ export class ScreensService {
     const byFormId = new Map(screens.map((s) => [s.formId, s]));
 
     await this.prisma.$transaction(async (tx) => {
+      const existingAuths = await tx.userScreenAuthorization.findMany({
+        where: { userId },
+        include: { screen: true },
+      });
+      const oldMap: Record<string, unknown> = {};
+      for (const a of existingAuths) {
+        oldMap[a.screen.screenId] = {
+          canAccess: a.canAccess,
+          canCreate: a.canCreate,
+          canEdit: a.canEdit,
+          canApprove: a.canApprove,
+          canExport: a.canExport,
+          authLevel: a.authLevel,
+        };
+      }
+      const newMap: Record<string, unknown> = { ...oldMap };
+
       const seenScreenDbIds = new Set<number>();
       for (const [key, val] of Object.entries(dto.authorizations)) {
         const screen = byScreenId.get(val.screenId || key) || byFormId.get(val.formId || key);
         if (!screen || seenScreenDbIds.has(screen.id)) continue;
         seenScreenDbIds.add(screen.id);
 
+        const nextEntry = {
+          authLevel: val.authLevel,
+          canAccess: Boolean(val.canAccess),
+          canCreate: Boolean(val.canCreate),
+          canEdit: Boolean(val.canEdit),
+          canApprove: Boolean(val.canApprove),
+          canExport: Boolean(val.canExport),
+        };
+        newMap[screen.screenId] = nextEntry;
+
         await tx.userScreenAuthorization.upsert({
           where: { userId_screenId: { userId, screenId: screen.id } },
           create: {
             userId,
             screenId: screen.id,
-            authLevel: val.authLevel,
-            canAccess: Boolean(val.canAccess),
-            canCreate: Boolean(val.canCreate),
-            canEdit: Boolean(val.canEdit),
-            canApprove: Boolean(val.canApprove),
-            canExport: Boolean(val.canExport),
+            ...nextEntry,
+            createUserId: actor.id,
+            updateUserId: actor.id,
           },
           update: {
-            authLevel: val.authLevel,
-            canAccess: Boolean(val.canAccess),
-            canCreate: Boolean(val.canCreate),
-            canEdit: Boolean(val.canEdit),
-            canApprove: Boolean(val.canApprove),
-            canExport: Boolean(val.canExport),
+            ...nextEntry,
+            updateUserId: actor.id,
           },
+        });
+      }
+
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'UserScreenAuthorization',
+          recordId: userId,
+          recordCode: user.username,
+          oldValues: oldMap,
+          newValues: newMap,
+          description: `Updated screen authorizations for user ${user.username}`,
+          actor,
+          tx,
         });
       }
 
@@ -233,6 +298,7 @@ export class ScreensService {
       where: { userId: dto.sourceUserId },
     });
     await this.prisma.$transaction(async (tx) => {
+      const targetUser = await tx.user.findUnique({ where: { id: dto.targetUserId } });
       await tx.userScreenAuthorization.deleteMany({ where: { userId: dto.targetUserId } });
       if (sourceAuths.length > 0) {
         await tx.userScreenAuthorization.createMany({
@@ -245,7 +311,21 @@ export class ScreensService {
             canEdit: s.canEdit,
             canApprove: s.canApprove,
             canExport: s.canExport,
+            createUserId: actor.id,
+            updateUserId: actor.id,
           })),
+        });
+      }
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'UserScreenAuthorization',
+          recordId: dto.targetUserId,
+          recordCode: targetUser?.username || `USR-${dto.targetUserId}`,
+          newValues: { copiedFromUserId: dto.sourceUserId, screenCount: sourceAuths.length },
+          description: `Copied ${sourceAuths.length} screen authorizations from user #${dto.sourceUserId} to ${targetUser?.username || `#${dto.targetUserId}`}`,
+          actor,
+          tx,
         });
       }
       await this.auditService.log({

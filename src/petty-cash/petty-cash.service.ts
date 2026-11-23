@@ -2,11 +2,13 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
@@ -40,7 +42,8 @@ export class PettyCashService {
     private readonly notificationsService: NotificationsService,
     private readonly fxResolver: ExchangeRateResolverService,
     private readonly numberSeries: NumberSeriesGeneratorService,
-  ) {}
+    @Optional() private readonly changeLogService?: ChangeLogService,
+  ) { }
 
   private isApproverRole(user: AuthenticatedUser): boolean {
     if (user.roleCode === 'ADM') return true;
@@ -243,10 +246,10 @@ export class PettyCashService {
         dto.requestId && !(await tx.pettyCashRequest.findUnique({ where: { requestId: dto.requestId } }))
           ? dto.requestId
           : await this.numberSeries.allocateNextNumber('FRM-PCR-REQ', {
-              branchId: scope.branchId,
-              tx,
-              fallbackPrefix: 'REQ-',
-            });
+            branchId: scope.branchId,
+            tx,
+            fallbackPrefix: 'REQ-',
+          });
 
       const created = await tx.pettyCashRequest.create({
         data: {
@@ -267,8 +270,21 @@ export class PettyCashService {
           remark: dto.remark || '',
           status,
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'PettyCashRequest',
+          recordId: created.id,
+          recordCode: created.requestId,
+          newValues: created,
+          actor: user,
+          tx,
+        });
+      }
 
       if (status === 'Submitted') {
         await this.approvalsService.initiateApproval({
@@ -320,9 +336,22 @@ export class PettyCashService {
       if (body.approvedAmount <= 0 || body.approvedAmount > toNumber(req.requestAmount)) {
         throw new BadRequestException('Approved amount must be greater than 0 and not exceed requested amount.');
       }
-      await this.prisma.pettyCashRequest.update({
-        where: { id },
-        data: { approvedAmount: toPrismaDecimal(body.approvedAmount) },
+      await this.prisma.$transaction(async (tx) => {
+        const next = await tx.pettyCashRequest.update({
+          where: { id },
+          data: { approvedAmount: toPrismaDecimal(body.approvedAmount!), updateUserId: user.id },
+        });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'PettyCashRequest',
+            recordId: id,
+            recordCode: req.requestId,
+            oldValues: req,
+            newValues: next,
+            actor: user,
+            tx,
+          });
+        }
       });
     }
 
@@ -341,6 +370,54 @@ export class PettyCashService {
       decision: 'reject',
       comment: body?.reason || body?.comment,
     });
+  }
+
+  async cancelRequest(user: AuthenticatedUser, id: number, reason?: string) {
+    const req = await this.prisma.pettyCashRequest.findUnique({ where: { id } });
+    if (!req) throw new NotFoundException(`Petty Cash Request #${id} not found.`);
+    await assertEntityScope(this.prisma, user, req);
+    if (['Paid', 'Settled', 'Cancelled'].includes(req.status)) {
+      throw new BadRequestException(`Cannot cancel Petty Cash Request in status "${req.status}".`);
+    }
+    const note = reason?.trim() || 'Cancelled by requester/finance';
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.pettyCashRequest.update({
+        where: { id },
+        data: {
+          status: 'Cancelled',
+          remark: `${req.remark ? `${req.remark} | ` : ''}Cancelled: ${note}`,
+          updateUserId: user.id,
+        },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'CANCEL',
+          tableName: 'PettyCashRequest',
+          recordId: id,
+          recordCode: req.requestId,
+          oldValues: req,
+          newValues: next,
+          description: `Cancelled Petty Cash Request ${req.requestId}: ${note}`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'petty_cash_request',
+        entityId: id,
+        docNo: req.requestId,
+        action: 'CANCEL',
+        step: `Cancelled Petty Cash Request ${req.requestId}`,
+        fromStatus: req.status,
+        toStatus: 'Cancelled',
+        performedById: user.id,
+        performedByName: user.fullName,
+        remarks: note,
+        tx,
+      });
+    });
+    const list = await this.listRequests(user);
+    return list.find((r) => r.id === id);
   }
 
   // ============================================================================
@@ -481,10 +558,10 @@ export class PettyCashService {
         dto.docNo && !(await tx.pettyCashAdvance.findUnique({ where: { docNo: dto.docNo } }))
           ? dto.docNo
           : await this.numberSeries.allocateNextNumber('FRM-PCA-ADV', {
-              branchId: scope.branchId,
-              tx,
-              fallbackPrefix: 'PCA-2026-',
-            });
+            branchId: scope.branchId,
+            tx,
+            fallbackPrefix: 'PCA-2026-',
+          });
 
       const approvedAmt = linkedReq
         ? toDecimal(linkedReq.approvedAmount ?? linkedReq.requestAmount)
@@ -522,21 +599,46 @@ export class PettyCashService {
           settledStatus: 'Unsettled (Active Advance)',
           status: dto.status || 'Paid',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
 
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'PettyCashAdvance',
+          recordId: adv.id,
+          recordCode: adv.docNo,
+          newValues: adv,
+          actor: user,
+          tx,
+        });
+      }
+
       if (linkedReq) {
-        await tx.pettyCashRequest.update({
+        const nextReq = await tx.pettyCashRequest.update({
           where: { id: linkedReq.id },
           data: {
             paidAmount: toPrismaDecimal(toDecimal(linkedReq.paidAmount).plus(toDecimal(dto.amountPaid))),
             status: 'Paid',
+            updateUserId: user.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'PettyCashRequest',
+            recordId: linkedReq.id,
+            recordCode: linkedReq.requestId,
+            oldValues: linkedReq,
+            newValues: nextReq,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       // Create corresponding live IOU ledger row
-      await tx.pettyCashIOU.create({
+      const iou = await tx.pettyCashIOU.create({
         data: {
           docId: adv.docNo,
           docDate: adv.docDate,
@@ -553,8 +655,20 @@ export class PettyCashService {
           returnAmount: toPrismaDecimal(0),
           pendingAmount: toPrismaDecimal(baseAmount),
           status: 'Active Advance',
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'PettyCashIOU',
+          recordId: iou.id,
+          recordCode: iou.docId,
+          newValues: iou,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'petty_cash_advance',
@@ -749,10 +863,10 @@ export class PettyCashService {
         dto.docNo && !(await tx.pettyCashBillSubmission.findUnique({ where: { docNo: dto.docNo } }))
           ? dto.docNo
           : await this.numberSeries.allocateNextNumber('FRM-BSUB-BILL', {
-              branchId: scope.branchId,
-              tx,
-              fallbackPrefix: 'BSUB-2026-',
-            });
+            branchId: scope.branchId,
+            tx,
+            fallbackPrefix: 'BSUB-2026-',
+          });
 
       const sub = await tx.pettyCashBillSubmission.create({
         data: {
@@ -780,8 +894,21 @@ export class PettyCashService {
           approverRemark: dto.approverRemark || '',
           status: 'Pending Verification',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'PettyCashBillSubmission',
+          recordId: sub.id,
+          recordCode: sub.docNo,
+          newValues: { ...sub, lineCount: preparedLines.length },
+          actor: user,
+          tx,
+        });
+      }
 
       await tx.pettyCashBillLine.createMany({
         data: preparedLines.map((l) => ({
@@ -808,14 +935,14 @@ export class PettyCashService {
           ? dto.adjustments
           : advance
             ? [
-                {
-                  paymentNo: advance.docNo,
-                  paymentDate: formatIsoDate(advance.docDate) || undefined,
-                  balanceAmount: toNumber(advanceBalanceBase),
-                  adjustedAmount: toNumber(totalBillBase),
-                  remark: 'Auto-linked settlement adjustment',
-                },
-              ]
+              {
+                paymentNo: advance.docNo,
+                paymentDate: formatIsoDate(advance.docDate) || undefined,
+                balanceAmount: toNumber(advanceBalanceBase),
+                adjustedAmount: toNumber(totalBillBase),
+                remark: 'Auto-linked settlement adjustment',
+              },
+            ]
             : [];
 
       if (adjustments.length > 0) {
@@ -865,7 +992,7 @@ export class PettyCashService {
     const nextStatus = decision === 'approve' ? 'Verified & Settled' : 'Rejected';
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.pettyCashBillSubmission.update({
+      const nextBill = await tx.pettyCashBillSubmission.update({
         where: { id },
         data: {
           status: nextStatus,
@@ -873,8 +1000,23 @@ export class PettyCashService {
           approverRemark: body?.remark || bill.approverRemark,
           verifiedById: user.id,
           verifiedAt: new Date(),
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: decision === 'approve' ? 'APPROVE' : 'REJECT',
+          tableName: 'PettyCashBillSubmission',
+          recordId: id,
+          recordCode: bill.docNo,
+          oldValues: bill,
+          newValues: nextBill,
+          description: `${nextStatus} by ${user.roleName}`,
+          actor: user,
+          tx,
+        });
+      }
 
       if (decision === 'approve' && bill.advanceId) {
         const adv = await tx.pettyCashAdvance.findUnique({ where: { id: bill.advanceId } });
@@ -940,9 +1082,22 @@ export class PettyCashService {
   async notifyCashierForBill(user: AuthenticatedUser, id: number) {
     const bill = await this.prisma.pettyCashBillSubmission.findUnique({ where: { id } });
     if (!bill) throw new NotFoundException(`Bill Submission #${id} not found.`);
-    await this.prisma.pettyCashBillSubmission.update({
-      where: { id },
-      data: { cashierNotified: true },
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.pettyCashBillSubmission.update({
+        where: { id },
+        data: { cashierNotified: true, updateUserId: user.id },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'PettyCashBillSubmission',
+          recordId: id,
+          recordCode: bill.docNo,
+          oldValues: bill,
+          newValues: next,
+          actor: user,
+          tx,
+        });
+      }
     });
     await this.notificationsService.createSystemAlert({
       title: `Cashier Notification: ${bill.docNo}`,
@@ -1025,10 +1180,10 @@ export class PettyCashService {
         dto.docNo && !(await tx.pettyCashReturn.findUnique({ where: { docNo: dto.docNo } }))
           ? dto.docNo
           : await this.numberSeries.allocateNextNumber('FRM-RET-CASH', {
-              branchId: scope.branchId,
-              tx,
-              fallbackPrefix: 'RET-2026-',
-            });
+            branchId: scope.branchId,
+            tx,
+            fallbackPrefix: 'RET-2026-',
+          });
 
       const advAmt = toDecimal(dto.advanceAmount ?? adv?.amountPaid ?? 0);
       const settledAmt = toDecimal(dto.settledAmount ?? adv?.settledAmount ?? 0);
@@ -1062,8 +1217,21 @@ export class PettyCashService {
           narration: dto.narration || '',
           status: 'Receipt Issued & Settled',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'PettyCashReturn',
+          recordId: ret.id,
+          recordCode: ret.docNo,
+          newValues: ret,
+          actor: user,
+          tx,
+        });
+      }
 
       // Credit float account & close advance/IOU atomically
       if (adv?.floatAccountId) {
@@ -1213,10 +1381,10 @@ export class PettyCashService {
         dto.docNo && !(await tx.floatReimbursement.findUnique({ where: { docNo: dto.docNo } }))
           ? dto.docNo
           : await this.numberSeries.allocateNextNumber('FRM-FLT-REIMB', {
-              branchId: scope.branchId,
-              tx,
-              fallbackPrefix: 'REIMB-2026-',
-            });
+            branchId: scope.branchId,
+            tx,
+            fallbackPrefix: 'REIMB-2026-',
+          });
 
       const created = await tx.floatReimbursement.create({
         data: {
@@ -1237,9 +1405,22 @@ export class PettyCashService {
           narration: dto.narration || '',
           status: 'Draft',
           createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
           vouchers: { create: vouchers },
         },
       });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'FloatReimbursement',
+          recordId: created.id,
+          recordCode: created.docNo,
+          newValues: created,
+          actor: user,
+          tx,
+        });
+      }
 
       await this.auditService.log({
         entityType: 'float_reimbursement',
@@ -1291,12 +1472,25 @@ export class PettyCashService {
           remark: dto.remark || '',
           amount: toPrismaDecimal(dto.amount),
           runningTotal: toPrismaDecimal(nextTotal),
+          createUserId: user.id,
+          updateUserId: user.id,
         },
       });
-      await tx.floatReimbursement.update({
+      const updated = await tx.floatReimbursement.update({
         where: { id: reimbursementId },
-        data: { reimburseAmount: toPrismaDecimal(nextTotal) },
+        data: { reimburseAmount: toPrismaDecimal(nextTotal), updateUserId: user.id },
       });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'FloatReimbursement',
+          recordId: reimbursementId,
+          recordCode: existing.docNo,
+          oldValues: existing,
+          newValues: updated,
+          actor: user,
+          tx,
+        });
+      }
     });
 
     const list = await this.listReimbursements(user);
@@ -1308,20 +1502,36 @@ export class PettyCashService {
     if (!existing) throw new NotFoundException(`Float Reimbursement #${id} not found.`);
     await assertEntityScope(this.prisma, user, existing);
 
-    await this.prisma.floatReimbursement.update({
-      where: { id },
-      data: { status: 'Submitted for Treasury Clearing' },
-    });
-    await this.auditService.log({
-      entityType: 'float_reimbursement',
-      entityId: id,
-      docNo: existing.docNo,
-      action: 'SUBMIT',
-      step: `Submitted Float Reimbursement ${existing.docNo} for Treasury Clearing`,
-      fromStatus: existing.status,
-      toStatus: 'Submitted for Treasury Clearing',
-      performedById: user.id,
-      performedByName: user.fullName,
+    await this.prisma.$transaction(async (tx) => {
+      const next = await tx.floatReimbursement.update({
+        where: { id },
+        data: { status: 'Submitted for Treasury Clearing', updateUserId: user.id },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'FloatReimbursement',
+          recordId: id,
+          recordCode: existing.docNo,
+          oldValues: existing,
+          newValues: next,
+          description: `Submitted Float Reimbursement ${existing.docNo} for Treasury Clearing`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'float_reimbursement',
+        entityId: id,
+        docNo: existing.docNo,
+        action: 'SUBMIT',
+        step: `Submitted Float Reimbursement ${existing.docNo} for Treasury Clearing`,
+        fromStatus: existing.status,
+        toStatus: 'Submitted for Treasury Clearing',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
     });
 
     const list = await this.listReimbursements(user);

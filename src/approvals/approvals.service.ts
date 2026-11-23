@@ -3,10 +3,12 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { ChangeLogService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { getEffectiveScope } from '../common/utils/scope.util';
@@ -39,6 +41,7 @@ export class ApprovalsService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly notificationsService: NotificationsService,
+    @Optional() private readonly changeLogService?: ChangeLogService,
   ) {}
 
   // ---- Stages CRUD ----
@@ -76,6 +79,9 @@ export class ApprovalsService {
     }
 
     const stage = await this.prisma.$transaction(async (tx) => {
+      const existing = id
+        ? await tx.approvalStage.findUnique({ where: { id }, include: { approvers: true } })
+        : null;
       const saved = id
         ? await tx.approvalStage.update({
             where: { id },
@@ -85,6 +91,7 @@ export class ApprovalsService {
               noOfApproval: dto.noOfApproval,
               noOfReject: dto.noOfReject,
               description: dto.description || '',
+              updateUserId: actor.id,
             },
           })
         : await tx.approvalStage.create({
@@ -94,6 +101,8 @@ export class ApprovalsService {
               noOfApproval: dto.noOfApproval,
               noOfReject: dto.noOfReject,
               description: dto.description || '',
+              createUserId: actor.id,
+              updateUserId: actor.id,
             },
           });
 
@@ -103,9 +112,34 @@ export class ApprovalsService {
           stageId: saved.id,
           userId: u.userId,
           maxLimitBase: toPrismaDecimal(u.maxLimit),
+          createUserId: actor.id,
+          updateUserId: actor.id,
         })),
         skipDuplicates: true,
       });
+
+      if (this.changeLogService) {
+        if (existing) {
+          await this.changeLogService.logUpdate({
+            tableName: 'ApprovalStage',
+            recordId: saved.id,
+            recordCode: saved.code,
+            oldValues: existing,
+            newValues: { ...saved, approvers: dto.users },
+            actor,
+            tx,
+          });
+        } else {
+          await this.changeLogService.logCreate({
+            tableName: 'ApprovalStage',
+            recordId: saved.id,
+            recordCode: saved.code,
+            newValues: { ...saved, approvers: dto.users },
+            actor,
+            tx,
+          });
+        }
+      }
 
       await this.auditService.log({
         entityType: 'approval_stage',
@@ -126,17 +160,33 @@ export class ApprovalsService {
   }
 
   async deleteStage(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.approvalStage.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Approval stage #${id} not found.`);
-    await this.prisma.approvalStage.delete({ where: { id } });
-    await this.auditService.log({
-      entityType: 'approval_stage',
-      entityId: id,
-      docNo: existing.code,
-      action: 'DELETE',
-      step: `Deleted approval stage ${existing.name}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.approvalStage.findUnique({
+        where: { id },
+        include: { approvers: true },
+      });
+      if (!existing) throw new NotFoundException(`Approval stage #${id} not found.`);
+      await tx.approvalStage.delete({ where: { id } });
+      if (this.changeLogService) {
+        await this.changeLogService.logDelete({
+          tableName: 'ApprovalStage',
+          recordId: id,
+          recordCode: existing.code,
+          oldValues: existing,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'approval_stage',
+        entityId: id,
+        docNo: existing.code,
+        action: 'DELETE',
+        step: `Deleted approval stage ${existing.name}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     return { deleted: true, id };
   }
@@ -204,6 +254,12 @@ export class ApprovalsService {
       .map(([key]) => key);
 
     const template = await this.prisma.$transaction(async (tx) => {
+      const existing = id
+        ? await tx.approvalTemplate.findUnique({
+            where: { id },
+            include: { stages: true, originators: true, terms: true },
+          })
+        : null;
       const saved = id
         ? await tx.approvalTemplate.update({
             where: { id },
@@ -212,6 +268,7 @@ export class ApprovalsService {
               name: dto.name.trim(),
               description: dto.description || '',
               governedDocuments,
+              updateUserId: actor.id,
             },
           })
         : await tx.approvalTemplate.create({
@@ -220,6 +277,8 @@ export class ApprovalsService {
               name: dto.name.trim(),
               description: dto.description || '',
               governedDocuments,
+              createUserId: actor.id,
+              updateUserId: actor.id,
             },
           });
 
@@ -229,6 +288,8 @@ export class ApprovalsService {
           templateId: saved.id,
           stageId: st.stageId,
           stageOrder: st.order || idx + 1,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         })),
       });
 
@@ -238,6 +299,8 @@ export class ApprovalsService {
           data: dto.originators.map((o) => ({
             templateId: saved.id,
             userId: o.userId,
+            createUserId: actor.id,
+            updateUserId: actor.id,
           })),
           skipDuplicates: true,
         });
@@ -252,8 +315,33 @@ export class ApprovalsService {
             operator: tm.operator,
             value: tm.value,
             description: tm.description || '',
+            createUserId: actor.id,
+            updateUserId: actor.id,
           })),
         });
+      }
+
+      if (this.changeLogService) {
+        if (existing) {
+          await this.changeLogService.logUpdate({
+            tableName: 'ApprovalTemplate',
+            recordId: saved.id,
+            recordCode: saved.code,
+            oldValues: existing,
+            newValues: { ...saved, stages: dto.stages, originators: dto.originators, terms: dto.terms },
+            actor,
+            tx,
+          });
+        } else {
+          await this.changeLogService.logCreate({
+            tableName: 'ApprovalTemplate',
+            recordId: saved.id,
+            recordCode: saved.code,
+            newValues: { ...saved, stages: dto.stages, originators: dto.originators, terms: dto.terms },
+            actor,
+            tx,
+          });
+        }
       }
 
       await this.auditService.log({
@@ -275,17 +363,30 @@ export class ApprovalsService {
   }
 
   async deleteTemplate(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.approvalTemplate.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException(`Approval template #${id} not found.`);
-    await this.prisma.approvalTemplate.delete({ where: { id } });
-    await this.auditService.log({
-      entityType: 'approval_template',
-      entityId: id,
-      docNo: existing.code,
-      action: 'DELETE',
-      step: `Deleted approval template ${existing.name}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.approvalTemplate.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException(`Approval template #${id} not found.`);
+      await tx.approvalTemplate.delete({ where: { id } });
+      if (this.changeLogService) {
+        await this.changeLogService.logDelete({
+          tableName: 'ApprovalTemplate',
+          recordId: id,
+          recordCode: existing.code,
+          oldValues: existing,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'approval_template',
+        entityId: id,
+        docNo: existing.code,
+        action: 'DELETE',
+        step: `Deleted approval template ${existing.name}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
     });
     return { deleted: true, id };
   }
@@ -635,16 +736,19 @@ export class ApprovalsService {
           completedAt: ['Approved', 'Rejected', 'Clarification'].includes(nextInstanceStatus)
             ? new Date()
             : null,
+          updateUserId: actor.id,
         },
       });
 
-      // Synchronize parent financial document status
+      // Synchronize parent financial document status + capture full before/after for ChangeLogs
       const remarkNote = dto.comment?.trim()
         ? `${dto.decision === 'approve' ? 'Approver' : 'Returned'}: ${dto.comment.trim()}`
         : undefined;
+      const changeAction = dto.decision === 'approve' ? 'APPROVE' : 'REJECT';
 
       if (instance.entityType === 'cash_deposit') {
-        await tx.cashDeposit.update({
+        const oldDep = await tx.cashDeposit.findUnique({ where: { id: instance.entityId } });
+        const nextDep = await tx.cashDeposit.update({
           where: { id: instance.entityId },
           data: {
             status: nextDocStatus,
@@ -652,11 +756,25 @@ export class ApprovalsService {
               ? { approvedById: actor.id, approvedAt: new Date() }
               : {}),
             ...(remarkNote ? { remark: remarkNote } : {}),
+            updateUserId: actor.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logAction({
+            action: changeAction,
+            tableName: 'CashDeposit',
+            recordId: instance.entityId,
+            recordCode: instance.docNo,
+            oldValues: oldDep,
+            newValues: nextDep,
+            description: auditStep,
+            actor,
+            tx,
+          });
+        }
       } else if (instance.entityType === 'petty_cash_request') {
         const reqRecord = await tx.pettyCashRequest.findUnique({ where: { id: instance.entityId } });
-        await tx.pettyCashRequest.update({
+        const nextReq = await tx.pettyCashRequest.update({
           where: { id: instance.entityId },
           data: {
             status: nextDocStatus,
@@ -669,10 +787,25 @@ export class ApprovalsService {
                 }
               : {}),
             ...(remarkNote ? { remark: remarkNote } : {}),
+            updateUserId: actor.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logAction({
+            action: changeAction,
+            tableName: 'PettyCashRequest',
+            recordId: instance.entityId,
+            recordCode: instance.docNo,
+            oldValues: reqRecord,
+            newValues: nextReq,
+            description: auditStep,
+            actor,
+            tx,
+          });
+        }
       } else if (instance.entityType === 'sales_reconciliation') {
-        await tx.salesReconciliation.update({
+        const oldRecon = await tx.salesReconciliation.findUnique({ where: { id: instance.entityId } });
+        const nextRecon = await tx.salesReconciliation.update({
           where: { id: instance.entityId },
           data: {
             status: nextDocStatus,
@@ -685,8 +818,22 @@ export class ApprovalsService {
                 }
               : {}),
             ...(remarkNote ? { remark: remarkNote } : {}),
+            updateUserId: actor.id,
           },
         });
+        if (this.changeLogService) {
+          await this.changeLogService.logAction({
+            action: changeAction,
+            tableName: 'SalesReconciliation',
+            recordId: instance.entityId,
+            recordCode: instance.docNo,
+            oldValues: oldRecon,
+            newValues: nextRecon,
+            description: auditStep,
+            actor,
+            tx,
+          });
+        }
       }
 
       await this.auditService.log({

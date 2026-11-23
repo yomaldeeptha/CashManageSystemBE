@@ -58,9 +58,12 @@ describe('ApprovalsService (Multi-Stage Maker-Checker Engine)', () => {
           totalStages: instanceMock.totalStages,
         })),
       },
-      cashDeposit: { update: jest.fn() },
+      cashDeposit: {
+        findUnique: jest.fn().mockResolvedValue({ id: 99, docNo: 'CCD-2026-0099', status: 'Pending' }),
+        update: jest.fn().mockResolvedValue({ id: 99, docNo: 'CCD-2026-0099', status: 'In Review' }),
+      },
       pettyCashRequest: { findUnique: jest.fn(), update: jest.fn() },
-      salesReconciliation: { update: jest.fn() },
+      salesReconciliation: { findUnique: jest.fn(), update: jest.fn() },
     };
 
     const prisma = {
