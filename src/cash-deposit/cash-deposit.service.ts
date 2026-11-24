@@ -1,9 +1,11 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Optional,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import Decimal from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
@@ -13,7 +15,11 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
-import { assertEntityScope, getEffectiveScope } from '../common/utils/scope.util';
+import {
+  applyEntityScopeToWhere,
+  assertEntityScope,
+  getEffectiveScope,
+} from '../common/utils/scope.util';
 import {
   formatIsoDate,
   parseDateOnly,
@@ -164,13 +170,12 @@ export class CashDepositService {
     const limit = Math.min(200, Math.max(1, Number(query?.limit) || 100));
 
     const where: Prisma.CashDepositWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true },
+    );
     if (query?.status && query.status !== 'all') {
       where.status = { equals: query.status, mode: 'insensitive' };
     }
@@ -282,7 +287,12 @@ export class CashDepositService {
       });
     }
 
-    const status = dto.status || 'Submitted';
+    if (totalBase.lte(0)) {
+      throw new BadRequestException('Cash Deposit total amount must be greater than zero.');
+    }
+
+    // Prevent client-side status spoofing; newly created deposits may only be Draft or Submitted
+    const status = dto.status === 'Draft' ? 'Draft' : 'Submitted';
 
     const createdId = await this.prisma.$transaction(async (tx) => {
       const docNo =
@@ -466,7 +476,7 @@ export class CashDepositService {
     const dep = await this.prisma.cashDeposit.findUnique({ where: { id } });
     if (!dep) throw new NotFoundException(`Cash Deposit #${id} not found.`);
     await assertEntityScope(this.prisma, user, dep);
-    if (['Posted', 'Cancelled', 'Reversed'].includes(dep.status)) {
+    if (['Approved', 'Posted', 'Cancelled', 'Reversed'].includes(dep.status)) {
       throw new BadRequestException(`Cannot cancel Cash Deposit in status "${dep.status}".`);
     }
     const note = reason?.trim() || 'Cancelled by authorized user';
@@ -479,6 +489,14 @@ export class CashDepositService {
           updatedById: user.id,
           updateUserId: user.id,
         },
+      });
+      await tx.approvalInstance.updateMany({
+        where: {
+          entityType: 'cash_deposit',
+          entityId: id,
+          status: { in: ['Pending', 'In Review'] },
+        },
+        data: { status: 'Cancelled', completedAt: new Date(), updateUserId: user.id },
       });
       if (this.changeLogService) {
         await this.changeLogService.logAction({
@@ -558,6 +576,14 @@ export class CashDepositService {
     if (dep.status !== 'Posted') {
       throw new BadRequestException(`Only Posted Cash Deposits can be reversed (current: "${dep.status}").`);
     }
+    const linkedBankCount = await this.prisma.outletBankDepositItem.count({
+      where: { cashDepositId: id },
+    });
+    if (linkedBankCount > 0) {
+      throw new BadRequestException(
+        `Cannot reverse Cash Deposit ${dep.docNo} because it is already included in a posted Bank Deposit batch.`,
+      );
+    }
     const note = reason?.trim() || 'Reversed by Finance Controller';
     await this.prisma.$transaction(async (tx) => {
       const next = await tx.cashDeposit.update({
@@ -616,12 +642,12 @@ export class CashDepositService {
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.CashierPaymentWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.status && query.status !== 'all') {
       where.approvalStatus = { equals: query.status, mode: 'insensitive' };
     }
@@ -692,18 +718,24 @@ export class CashDepositService {
 
       let balanceAfter = new Decimal(0);
       if (floatAcc) {
-        const currentBal = toDecimal(floatAcc.currentBalance);
-        if (currentBal.lt(toDecimal(dto.amount))) {
+        if (floatAcc.currencyId !== cur.id) {
           throw new BadRequestException(
-            `Insufficient float balance in "${floatAcc.name}". Available: ${toNumber(currentBal)}, Requested: ${dto.amount}.`,
+            `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
           );
         }
-        balanceAfter = currentBal.minus(toDecimal(dto.amount));
-        const updatedFloat = await tx.floatAccount.update({
-          where: { id: floatAcc.id },
-          data: { currentBalance: toPrismaDecimal(balanceAfter), updateUserId: user.id },
+        const deductAmt = toPrismaDecimal(dto.amount);
+        const debited = await tx.floatAccount.updateMany({
+          where: { id: floatAcc.id, currentBalance: { gte: deductAmt } },
+          data: { currentBalance: { decrement: deductAmt }, updateUserId: user.id },
         });
-        if (this.changeLogService) {
+        if (debited.count === 0) {
+          throw new BadRequestException(
+            `Insufficient float balance in "${floatAcc.name}". Available: ${toNumber(floatAcc.currentBalance)}, Requested: ${dto.amount}.`,
+          );
+        }
+        const updatedFloat = await tx.floatAccount.findUnique({ where: { id: floatAcc.id } });
+        balanceAfter = toDecimal(updatedFloat?.currentBalance ?? 0);
+        if (this.changeLogService && updatedFloat) {
           await this.changeLogService.logUpdate({
             tableName: 'FloatAccount',
             recordId: floatAcc.id,
@@ -730,7 +762,7 @@ export class CashDepositService {
         dto.paymentVoucherNo &&
         !(await tx.cashierPayment.findUnique({ where: { paymentVoucherNo: dto.paymentVoucherNo } }))
           ? dto.paymentVoucherNo
-          : `PV-${Date.now().toString().slice(-6)}`;
+          : `PV-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 
       const payment = await tx.cashierPayment.create({
         data: {
@@ -760,7 +792,7 @@ export class CashDepositService {
           receiptNumber: dto.receiptNumber || null,
           narration: dto.narration || '',
           denominations: (dto.denominations || {}) as Prisma.InputJsonValue,
-          approvalStatus: dto.approvalStatus || 'Submitted',
+          approvalStatus: dto.approvalStatus === 'Draft' ? 'Draft' : 'Submitted',
           approvedByName: 'Pending Checker Audit',
           createdById: user.id,
           createUserId: user.id,
@@ -829,12 +861,12 @@ export class CashDepositService {
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.CashierSettlementWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.pendingOnly) {
       where.status = { in: ['Pending', 'Pending Acceptance', 'Under Review'] };
     } else if (query?.status && query.status !== 'all') {
@@ -1066,6 +1098,11 @@ export class CashDepositService {
     const settlement = await this.prisma.cashierSettlement.findUnique({ where: { id } });
     if (!settlement) throw new NotFoundException(`Cashier Settlement #${id} not found.`);
     await assertEntityScope(this.prisma, user, settlement);
+    if (settlement.createdById === user.id) {
+      throw new ForbiddenException(
+        'Maker-Checker control violation: the cashier who created a settlement cannot accept it.',
+      );
+    }
     if (settlement.status.includes('Accepted')) {
       throw new BadRequestException('Settlement has already been accepted.');
     }
@@ -1118,12 +1155,12 @@ export class CashDepositService {
   async listReceipts(user: AuthenticatedUser, query?: { companyId?: number; outletId?: string; search?: string }) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.CashCollectionReceiptWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1318,12 +1355,12 @@ export class CashDepositService {
   async listMainCashierPayments(user: AuthenticatedUser, query?: { companyId?: number; outletId?: string; search?: string }) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.MainCashierPaymentWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1389,26 +1426,33 @@ export class CashDepositService {
           ? await tx.floatAccount.findFirst({ where: { name: { equals: dto.floatAccount, mode: 'insensitive' } } })
           : null;
 
-      let balanceAfter = toDecimal(floatAcc?.currentBalance ?? 9850);
+      let balanceAfter = toDecimal(floatAcc?.currentBalance ?? 0);
       if (!editId && floatAcc) {
-        if (balanceAfter.lt(toDecimal(dto.amount))) {
+        if (floatAcc.currencyId !== cur.id) {
+          throw new BadRequestException(
+            `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
+          );
+        }
+        const deductAmt = toPrismaDecimal(dto.amount);
+        const debited = await tx.floatAccount.updateMany({
+          where: { id: floatAcc.id, currentBalance: { gte: deductAmt } },
+          data: { currentBalance: { decrement: deductAmt }, updateUserId: user.id },
+        });
+        if (debited.count === 0) {
           throw new BadRequestException(
             `Insufficient vault float balance in "${floatAcc.name}". Available: ${toNumber(balanceAfter)}.`,
           );
         }
-        balanceAfter = balanceAfter.minus(toDecimal(dto.amount));
-        const updatedFloat = await tx.floatAccount.update({
-          where: { id: floatAcc.id },
-          data: { currentBalance: toPrismaDecimal(balanceAfter), updateUserId: user.id },
-        });
-        if (this.changeLogService) {
+        const updatedFloat = await tx.floatAccount.findUnique({ where: { id: floatAcc.id } });
+        balanceAfter = toDecimal(updatedFloat?.currentBalance ?? 0);
+        if (this.changeLogService && updatedFloat) {
           await this.changeLogService.logUpdate({
             tableName: 'FloatAccount',
             recordId: floatAcc.id,
             recordCode: floatAcc.code,
             oldValues: floatAcc,
             newValues: updatedFloat,
-            description: `Deducted ${cur.code} ${dto.amount} for Cashier Payment`,
+            description: `Deducted ${cur.code} ${dto.amount} for Main Cashier Payment`,
             actor: user,
             tx,
           });
@@ -1417,6 +1461,37 @@ export class CashDepositService {
 
       if (editId) {
         const oldMainPay = await tx.mainCashierPayment.findUnique({ where: { id: editId } });
+        if (!oldMainPay) {
+          throw new NotFoundException(`Main Cashier Payment #${editId} not found.`);
+        }
+        await assertEntityScope(this.prisma, user, oldMainPay);
+        if (['Approved', 'Posted', 'Locked'].includes(oldMainPay.approvalStatus)) {
+          throw new ForbiddenException(
+            `Cannot modify Main Cashier Payment ${oldMainPay.docNo} once status is "${oldMainPay.approvalStatus}".`,
+          );
+        }
+        const delta = toDecimal(dto.amount).minus(toDecimal(oldMainPay.amount));
+        if (floatAcc && !delta.eq(0)) {
+          if (floatAcc.currencyId !== cur.id) {
+            throw new BadRequestException(
+              `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
+            );
+          }
+          if (delta.gt(0)) {
+            const debited = await tx.floatAccount.updateMany({
+              where: { id: floatAcc.id, currentBalance: { gte: toPrismaDecimal(delta) } },
+              data: { currentBalance: { decrement: toPrismaDecimal(delta) }, updateUserId: user.id },
+            });
+            if (debited.count === 0) {
+              throw new BadRequestException(`Insufficient vault float balance for increased payment amount.`);
+            }
+          } else {
+            await tx.floatAccount.update({
+              where: { id: floatAcc.id },
+              data: { currentBalance: { increment: toPrismaDecimal(delta.abs()) }, updateUserId: user.id },
+            });
+          }
+        }
         const updated = await tx.mainCashierPayment.update({
           where: { id: editId },
           data: {
@@ -1435,7 +1510,7 @@ export class CashDepositService {
             requesterName: dto.requester || user.fullName,
             floatAccountId: floatAcc?.id || null,
             floatAccountName: floatAcc?.name || dto.floatAccount || 'Central Vault Float',
-            approvalStatus: dto.approvalStatus || 'Submitted',
+            approvalStatus: dto.approvalStatus === 'Draft' ? 'Draft' : 'Submitted',
             receiptNumber: dto.receiptNumber || null,
             narration: dto.narration || '',
             denominations: (dto.denominations || {}) as Prisma.InputJsonValue,
@@ -1505,8 +1580,8 @@ export class CashDepositService {
           floatAccountName: floatAcc?.name || dto.floatAccount || 'Central Vault Float',
           totalBalanceInHand: toPrismaDecimal(balanceAfter),
           balanceCurrency: cur.code,
-          approvalStatus: dto.approvalStatus || 'Submitted',
-          approvedByName: dto.approvalStatus === 'Approved' ? user.fullName : 'Pending Sign-off',
+          approvalStatus: dto.approvalStatus === 'Draft' ? 'Draft' : 'Submitted',
+          approvedByName: 'Pending Sign-off',
           receiptNumber: dto.receiptNumber || `RCT-TREAS-${Date.now().toString().slice(-4)}`,
           narration: dto.narration || '',
           denominations: (dto.denominations || {}) as Prisma.InputJsonValue,
@@ -1553,12 +1628,12 @@ export class CashDepositService {
   async listMainCashierSettlements(user: AuthenticatedUser, query?: { companyId?: number; outletId?: string; search?: string }) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.MainCashierSettlementWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1786,11 +1861,12 @@ export class CashDepositService {
   async listBankDeposits(user: AuthenticatedUser, query?: { companyId?: number; search?: string }) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.OutletBankDepositWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeBranch: true, includeOutlet: false },
+    );
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1850,9 +1926,28 @@ export class CashDepositService {
     const linkedDeposits =
       dto.cashDepositIds && dto.cashDepositIds.length > 0
         ? await this.prisma.cashDeposit.findMany({
-            where: { id: { in: dto.cashDepositIds }, companyId: scope.companyId },
+            where: {
+              id: { in: dto.cashDepositIds },
+              companyId: scope.companyId,
+              branchId: scope.branchId,
+              ...(scope.outletId ? { outletId: scope.outletId } : {}),
+            },
           })
         : [];
+
+    if (dto.cashDepositIds && dto.cashDepositIds.length > 0) {
+      if (linkedDeposits.length !== new Set(dto.cashDepositIds).size) {
+        throw new BadRequestException(
+          'One or more selected Cash Deposit slips were not found in your authorized entity scope.',
+        );
+      }
+      const unapproved = linkedDeposits.filter((d) => d.status !== 'Approved');
+      if (unapproved.length > 0) {
+        throw new BadRequestException(
+          `Only Approved Cash Deposits may be deposited to bank. Invalid slips: ${unapproved.map((d) => `${d.docNo} (${d.status})`).join(', ')}.`,
+        );
+      }
+    }
 
     const totalAmount =
       linkedDeposits.length > 0
@@ -1960,10 +2055,18 @@ export class CashDepositService {
           })),
         });
         if (isBank) {
-          await tx.cashDeposit.updateMany({
-            where: { id: { in: linkedDeposits.map((d) => d.id) } },
+          const postedResult = await tx.cashDeposit.updateMany({
+            where: {
+              id: { in: linkedDeposits.map((d) => d.id) },
+              status: 'Approved',
+            },
             data: { status: 'Posted', updateUserId: user.id },
           });
+          if (postedResult.count !== linkedDeposits.length) {
+            throw new BadRequestException(
+              'One or more selected Cash Deposits were already posted or changed status concurrently.',
+            );
+          }
           if (this.changeLogService) {
             for (const ld of linkedDeposits) {
               await this.changeLogService.logAction({
@@ -1983,10 +2086,10 @@ export class CashDepositService {
       }
 
       if (isBank && scope.outletId) {
-        const recCount = await tx.bankReconciliation.count();
+        const brecSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
         const brec = await tx.bankReconciliation.create({
           data: {
-            docCode: `BREC-2026-${String(recCount + 1).padStart(3, '0')}`,
+            docCode: `BREC-${new Date().getUTCFullYear()}-${brecSuffix}`,
             companyId: scope.companyId,
             branchId: scope.branchId,
             outletId: scope.outletId,
@@ -2073,13 +2176,19 @@ export class CashDepositService {
   }
 
   async importBankStatements(user: AuthenticatedUser, dto: ImportBankStatementDto) {
+    const scope = await getEffectiveScope(this.prisma, user);
     let matchedCount = 0;
     let varianceCount = 0;
 
     await this.prisma.$transaction(async (tx) => {
       for (const row of dto.rows) {
         const existing = await tx.bankReconciliation.findFirst({
-          where: { depositBankRefNo: row.depositBankRefNo.trim() },
+          where: {
+            depositBankRefNo: row.depositBankRefNo.trim(),
+            ...(!scope.unrestricted
+              ? { companyId: { in: scope.companyIds }, outletId: { in: scope.outletIds } }
+              : {}),
+          },
         });
         if (!existing) continue;
 

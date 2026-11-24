@@ -142,6 +142,23 @@ export class NumberSeriesService {
   async updateSeries(actor: AuthenticatedUser, id: number, dto: SaveNumberSeriesDto) {
     const existing = await this.prisma.numberSeries.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
+    if (existing.isLocked && dto.isLocked !== false) {
+      throw new BadRequestException(
+        `Number series "${existing.seriesName}" is locked. Unlock it before modifying configuration.`,
+      );
+    }
+    const nextInit = dto.initialNumber ?? existing.initialNumber;
+    const nextVal = dto.nextNumber;
+    const nextLast = dto.lastNumber ?? existing.lastNumber;
+    if (nextVal < nextInit || nextVal > nextLast || nextInit > nextLast) {
+      throw new BadRequestException(
+        `Invalid series bounds: must satisfy initialNumber (${nextInit}) <= nextNumber (${nextVal}) <= lastNumber (${nextLast}).`,
+      );
+    }
+    const formExists = await this.prisma.formMaster.findUnique({ where: { formId: dto.formId } });
+    if (!formExists) {
+      throw new BadRequestException(`Form Master "${dto.formId}" does not exist.`);
+    }
 
     let branchId: number | null = dto.branchId ?? null;
     if (!branchId && dto.branch && dto.branch !== 'All Branches') {
@@ -316,34 +333,51 @@ export class NumberSeriesService {
   }
 
   async incrementNext(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.numberSeries.findUnique({
-      where: { id },
-      include: { formMaster: true, branch: true },
+    const result = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.numberSeries.findUnique({
+        where: { id },
+        include: { formMaster: true, branch: true },
+      });
+      if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
+      if (existing.isLocked) {
+        throw new BadRequestException(`Number series "${existing.seriesName}" is locked.`);
+      }
+      const generatedNumber = await this.generator.allocateNextNumber(existing.formId, {
+        preferredSeriesId: existing.seriesId,
+        tx,
+      });
+      const refreshed = await tx.numberSeries.findUnique({
+        where: { id },
+        include: { formMaster: true, branch: true },
+      });
+      if (this.changeLogService && refreshed) {
+        await this.changeLogService.logUpdate({
+          tableName: 'NumberSeries',
+          recordId: id,
+          recordCode: existing.seriesId,
+          oldValues: { nextNumber: existing.nextNumber },
+          newValues: { nextNumber: refreshed.nextNumber },
+          description: `Allocated document number ${generatedNumber} from ${existing.seriesName}`,
+          actor,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'number_series',
+        entityId: id,
+        docNo: generatedNumber,
+        action: 'ALLOCATE_NUMBER',
+        step: `Allocated document number ${generatedNumber} from ${existing.seriesName}`,
+        performedById: actor.id,
+        performedByName: actor.fullName,
+        tx,
+      });
+      return {
+        generatedNumber,
+        series: refreshed ? this.serializeSeries(refreshed) : null,
+      };
     });
-    if (!existing) throw new NotFoundException(`Number series #${id} not found.`);
-    if (existing.isLocked) {
-      throw new BadRequestException(`Number series "${existing.seriesName}" is locked.`);
-    }
-    const generatedNumber = await this.generator.allocateNextNumber(existing.formId, {
-      preferredSeriesId: existing.seriesId,
-    });
-    const refreshed = await this.prisma.numberSeries.findUnique({
-      where: { id },
-      include: { formMaster: true, branch: true },
-    });
-    await this.auditService.log({
-      entityType: 'number_series',
-      entityId: id,
-      docNo: generatedNumber,
-      action: 'ALLOCATE_NUMBER',
-      step: `Allocated document number ${generatedNumber} from ${existing.seriesName}`,
-      performedById: actor.id,
-      performedByName: actor.fullName,
-    });
-    return {
-      generatedNumber,
-      series: refreshed ? this.serializeSeries(refreshed) : null,
-    };
+    return result;
   }
 
   // ---- Form Master ----

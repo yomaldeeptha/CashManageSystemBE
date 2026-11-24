@@ -37,6 +37,9 @@ describe('SalesReconService', () => {
         findUnique: jest.fn().mockResolvedValue({
           id: 5,
           docNo: 'SREC-2026-0042',
+          companyId: 1,
+          branchId: 1,
+          outletId: 1,
           isPeriodLocked: true,
           status: 'Locked',
         }),

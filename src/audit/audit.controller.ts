@@ -15,6 +15,7 @@ export class AuditController {
   @Get('logs')
   @ApiOperation({ summary: 'Query immutable audit trail entries' })
   getLogs(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('entityType') entityType?: string,
     @Query('entityId') entityId?: string,
     @Query('docNo') docNo?: string,
@@ -22,7 +23,7 @@ export class AuditController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.auditService.getLogs({
+    return this.auditService.getLogs(user, {
       entityType,
       entityId: entityId ? Number(entityId) : undefined,
       docNo,

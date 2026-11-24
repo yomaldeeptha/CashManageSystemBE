@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   ParseIntPipe,
@@ -52,7 +53,19 @@ export class ScreensController {
 
   @Get('user-authorizations/:userId')
   @ApiOperation({ summary: 'Get screen authorization map for a single user' })
-  getUserAuth(@Param('userId', ParseIntPipe) userId: number) {
+  getUserAuth(
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param('userId', ParseIntPipe) userId: number,
+  ) {
+    if (
+      actor.id !== userId &&
+      actor.roleCode !== 'ADM' &&
+      !actor.permissions?.userManagement?.read
+    ) {
+      throw new ForbiddenException(
+        'You are not authorized to view another user’s screen authorizations.',
+      );
+    }
     return this.screensService.getUserAuthorizations(userId);
   }
 

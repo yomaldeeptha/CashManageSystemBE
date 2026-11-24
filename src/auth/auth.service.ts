@@ -103,16 +103,35 @@ export class AuthService {
     };
   }
 
+  private parseDurationMs(value: string | undefined, fallbackMs: number): number {
+    if (!value) return fallbackMs;
+    const match = /^(\d+)\s*([smhd])$/i.exec(value.trim());
+    if (!match) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric * 1000 : fallbackMs;
+    }
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+    const multipliers: Record<string, number> = {
+      s: 1000,
+      m: 60 * 1000,
+      h: 60 * 60 * 1000,
+      d: 24 * 60 * 60 * 1000,
+    };
+    return amount * (multipliers[unit] || 24 * 60 * 60 * 1000);
+  }
+
   private async issueTokenPair(
     user: AuthenticatedUser,
     meta?: { deviceInfo?: string; ipAddress?: string },
+    tx?: { refreshToken: { create: typeof PrismaService.prototype.refreshToken.create } },
   ) {
     const accessSecret = this.configService.get<string>('ACCESS_TOKEN_SECRET') || 'dev-fallback-secret';
     const accessExpiresIn = this.configService.get<string>('ACCESS_TOKEN_EXPIRES_IN') || '15m';
-    const refreshExpiresDays = parseInt(
-      (this.configService.get<string>('REFRESH_TOKEN_EXPIRES_IN') || '7d').replace(/\D/g, ''),
-      10,
-    ) || 7;
+    const refreshTtlMs = this.parseDurationMs(
+      this.configService.get<string>('REFRESH_TOKEN_EXPIRES_IN') || '7d',
+      7 * 24 * 60 * 60 * 1000,
+    );
 
     const accessToken = await this.jwtService.signAsync(
       {
@@ -128,9 +147,10 @@ export class AuthService {
 
     const rawRefreshToken = crypto.randomBytes(48).toString('hex');
     const tokenHash = this.hashRefreshToken(rawRefreshToken);
-    const expiresAt = new Date(Date.now() + refreshExpiresDays * 24 * 60 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + refreshTtlMs);
+    const db = tx || this.prisma;
 
-    await this.prisma.refreshToken.create({
+    await db.refreshToken.create({
       data: {
         userId: user.id,
         tokenHash,
@@ -261,15 +281,23 @@ export class AuthService {
       throw new UnauthorizedException('User account is inactive.');
     }
 
-    // Rotate refresh token atomically
-    await this.prisma.refreshToken.update({
-      where: { id: stored.id },
-      data: { revokedAt: new Date() },
-    });
-
-    const tokens = await this.issueTokenPair(authUser, {
-      deviceInfo: stored.deviceInfo || undefined,
-      ipAddress,
+    // Rotate refresh token atomically with single-use guard to prevent replay races
+    const tokens = await this.prisma.$transaction(async (tx) => {
+      const revoked = await tx.refreshToken.updateMany({
+        where: { id: stored.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (revoked.count === 0) {
+        throw new UnauthorizedException('Refresh token has already been used or revoked.');
+      }
+      return this.issueTokenPair(
+        authUser,
+        {
+          deviceInfo: stored.deviceInfo || undefined,
+          ipAddress,
+        },
+        tx,
+      );
     });
 
     const userPayload = await this.buildUserSessionPayload(authUser);
@@ -412,6 +440,9 @@ export class AuthService {
     }
 
     const numericId = Number(sessionId);
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new BadRequestException('Invalid session ID.');
+    }
     await this.prisma.refreshToken.updateMany({
       where: { id: numericId, userId: user.id, revokedAt: null },
       data: { revokedAt: new Date() },

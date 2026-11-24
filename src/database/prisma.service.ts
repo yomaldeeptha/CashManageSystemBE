@@ -24,23 +24,21 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     this.enforceAppendOnlyAuditModels();
   }
 
-  /**
-   * Runtime ORM-level protection ensuring ChangeLogs and AuditLogs can never be
-   * updated, upserted, or deleted through the NestJS application Prisma client.
-   */
-  private enforceAppendOnlyAuditModels(): void {
+  private lockAuditDelegates(client: Record<string, unknown>): void {
     const blocked = () => {
       throw new ForbiddenException(IMMUTABLE_AUDIT_ERROR);
     };
 
     const immutableDelegates = [
-      this.changeLog as unknown as Record<string, unknown>,
-      this.auditLog as unknown as Record<string, unknown>,
+      client.changeLog as Record<string, unknown> | undefined,
+      client.auditLog as Record<string, unknown> | undefined,
     ];
 
     for (const delegate of immutableDelegates) {
       if (!delegate) continue;
       for (const op of ['update', 'updateMany', 'upsert', 'delete', 'deleteMany']) {
+        const desc = Object.getOwnPropertyDescriptor(delegate, op);
+        if (desc && desc.configurable === false) continue;
         Object.defineProperty(delegate, op, {
           value: blocked,
           writable: false,
@@ -48,6 +46,39 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         });
       }
     }
+  }
+
+  /**
+   * Runtime ORM-level protection ensuring ChangeLogs and AuditLogs can never be
+   * updated, upserted, or deleted through either the root Prisma client OR
+   * interactive $transaction(tx => ...) callbacks.
+   */
+  private enforceAppendOnlyAuditModels(): void {
+    this.lockAuditDelegates(this as unknown as Record<string, unknown>);
+
+    const originalTransaction = this.$transaction.bind(this) as (
+      arg: unknown,
+      options?: unknown,
+    ) => Promise<unknown>;
+
+    Object.defineProperty(this, '$transaction', {
+      value: (arg: unknown, options?: unknown) => {
+        if (typeof arg === 'function') {
+          const wrappedCallback = (tx: Record<string, unknown>) => {
+            this.lockAuditDelegates(tx);
+            return (arg as (txClient: unknown) => unknown)(tx);
+          };
+          return options !== undefined
+            ? originalTransaction(wrappedCallback, options)
+            : originalTransaction(wrappedCallback);
+        }
+        return options !== undefined
+          ? originalTransaction(arg, options)
+          : originalTransaction(arg);
+      },
+      writable: false,
+      configurable: false,
+    });
   }
 
   async onModuleInit(): Promise<void> {

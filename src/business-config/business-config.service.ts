@@ -105,6 +105,36 @@ export class BusinessConfigService {
   }
 
   async updateConfig(actor: AuthenticatedUser, dto: UpdateBusinessConfigDto) {
+    // Validate numeric invariants on nested configuration sections
+    if (dto.currency?.decimalPrecision !== undefined) {
+      const prec = Number(dto.currency.decimalPrecision);
+      if (!Number.isInteger(prec) || prec < 0 || prec > 4) {
+        throw new BadRequestException('Decimal precision must be an integer between 0 and 4.');
+      }
+    }
+    if (dto.currency?.fixedExchangeRateMVR !== undefined && Number(dto.currency.fixedExchangeRateMVR) <= 0) {
+      throw new BadRequestException('Fixed MVR exchange rate must be greater than zero.');
+    }
+    if (dto.currency?.fixedExchangeRateEUR !== undefined && Number(dto.currency.fixedExchangeRateEUR) <= 0) {
+      throw new BadRequestException('Fixed EUR exchange rate must be greater than zero.');
+    }
+    const nonNegativeChecks: Array<[string, unknown]> = [
+      ['varianceTolerancePercent', dto.currency?.varianceTolerancePercent],
+      ['defaultTGSTRate', dto.fiscal?.defaultTGSTRate],
+      ['pettyCashGstRate', dto.fiscal?.pettyCashGstRate],
+      ['serviceChargeRate', dto.fiscal?.serviceChargeRate],
+      ['maxCashAdvanceVoucherUSD', dto.cashLimits?.maxCashAdvanceVoucherUSD],
+      ['dualSignatoryRequiredUSD', dto.cashLimits?.dualSignatoryRequiredUSD],
+      ['mandatoryReceiptThresholdUSD', dto.cashLimits?.mandatoryReceiptThresholdUSD],
+      ['defaultOutletTillFloatUSD', dto.cashLimits?.defaultOutletTillFloatUSD],
+      ['highVarianceAlertUSD', dto.cashLimits?.highVarianceAlertUSD],
+    ];
+    for (const [field, val] of nonNegativeChecks) {
+      if (val !== undefined && (!Number.isFinite(Number(val)) || Number(val) < 0)) {
+        throw new BadRequestException(`Configuration field "${field}" must be a non-negative number.`);
+      }
+    }
+
     let existing = await this.prisma.businessConfig.findFirst({ orderBy: { id: 'asc' } });
     if (!existing) {
       existing = await this.prisma.businessConfig.create({ data: {} });

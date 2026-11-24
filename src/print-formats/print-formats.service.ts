@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
+import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
+import { getEffectiveScope } from '../common/utils/scope.util';
 import { toNumber } from '../common/utils/decimal.util';
 
 @Injectable()
@@ -26,20 +28,30 @@ export class PrintFormatsService {
     }));
   }
 
-  async getPreviewData(templateKey: string) {
+  async getPreviewData(user: AuthenticatedUser, templateKey: string) {
     const tpl = await this.prisma.printTemplate.findFirst({
       where: { OR: [{ templateKey }, { code: templateKey }] },
     });
     if (!tpl) throw new NotFoundException(`Print template "${templateKey}" not found.`);
 
+    const scope = await getEffectiveScope(this.prisma, user);
+    const companyWhere = !scope.unrestricted ? { id: { in: scope.companyIds } } : {};
+    const docScopeWhere = !scope.unrestricted
+      ? { companyId: { in: scope.companyIds }, outletId: { in: scope.outletIds } }
+      : {};
+    const branchScopeWhere = !scope.unrestricted
+      ? { companyId: { in: scope.companyIds }, branchId: { in: scope.branchIds } }
+      : {};
+
     const [company, baseInfo] = await Promise.all([
-      this.prisma.company.findFirst({ where: { isActive: true }, orderBy: { id: 'asc' } }),
+      this.prisma.company.findFirst({ where: { isActive: true, ...companyWhere }, orderBy: { id: 'asc' } }),
       this.fxResolver.getSystemBaseCurrency(),
     ]);
 
     let latestDocument: Record<string, unknown> | null = null;
     if (tpl.templateKey === 'PRINT-01') {
       const dep = await this.prisma.cashDeposit.findFirst({
+        where: docScopeWhere,
         orderBy: { id: 'desc' },
         include: { outlet: true, branch: true, cashier: true, cashCollector: true, currencies: { include: { currency: true } } },
       });
@@ -64,6 +76,7 @@ export class PrintFormatsService {
       }
     } else if (tpl.templateKey === 'PRINT-02') {
       const pay = await this.prisma.cashierPayment.findFirst({
+        where: docScopeWhere,
         orderBy: { id: 'desc' },
         include: { currency: true, outlet: true },
       });
@@ -81,6 +94,7 @@ export class PrintFormatsService {
       }
     } else if (tpl.templateKey === 'PRINT-03') {
       const adv = await this.prisma.pettyCashAdvance.findFirst({
+        where: branchScopeWhere,
         orderBy: { id: 'desc' },
         include: { currency: true },
       });
@@ -98,6 +112,7 @@ export class PrintFormatsService {
       }
     } else if (tpl.templateKey === 'PRINT-04') {
       const bill = await this.prisma.pettyCashBillSubmission.findFirst({
+        where: branchScopeWhere,
         orderBy: { id: 'desc' },
         include: { lines: { include: { currency: true } } },
       });
@@ -121,6 +136,7 @@ export class PrintFormatsService {
       }
     } else {
       const recon = await this.prisma.salesReconciliation.findFirst({
+        where: docScopeWhere,
         orderBy: { id: 'desc' },
         include: { outlet: true, shift: true, cashier: true },
       });

@@ -198,12 +198,18 @@ describe('BNF Connect CMS REST API (HTTP E2E)', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('blocks unauthorized users from restricted admin entity record history (403)', async () => {
+    it('blocks unauthorized users from restricted admin entity record history (403) even with lowercase tableName', async () => {
       const res = await request(app.getHttpServer())
         .get('/api/v1/audit-logs/record/User/1')
         .set('Authorization', `Bearer ${cashierToken}`)
         .expect(403);
       expect(res.body.success).toBe(false);
+
+      const lowerRes = await request(app.getHttpServer())
+        .get('/api/v1/audit-logs/record/user/1')
+        .set('Authorization', `Bearer ${cashierToken}`)
+        .expect(403);
+      expect(lowerRes.body.success).toBe(false);
     });
 
     it('allows authorized administrators to query global audit logs and record history (200)', async () => {

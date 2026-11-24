@@ -1,9 +1,11 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Optional,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
@@ -154,6 +156,12 @@ export class UsersService {
     if (!role) {
       throw new BadRequestException(`Role ID ${dto.systemUserRoleId} does not exist.`);
     }
+    if (role.code === 'ADM' && actor.roleCode !== 'ADM') {
+      throw new ForbiddenException('Only System Administrators can provision ADM users.');
+    }
+    if (dto.userName.trim().toLowerCase() === 'system') {
+      throw new BadRequestException('Username "system" is reserved for internal automation.');
+    }
 
     let userGroupDbId: number | null = null;
     if (dto.userGroupId) {
@@ -163,7 +171,11 @@ export class UsersService {
       if (grp) userGroupDbId = grp.id;
     }
 
-    const passwordHash = await bcrypt.hash(dto.password || 'bnf@connect2026', 12);
+    const hasExplicitPassword = Boolean(dto.password && dto.password.trim().length > 0);
+    const effectivePassword = hasExplicitPassword
+      ? dto.password!.trim()
+      : crypto.randomBytes(16).toString('base64url');
+    const passwordHash = await bcrypt.hash(effectivePassword, 12);
     const companyIds = extractNumericIds(dto.selectedBusiness);
     const branchIds = extractNumericIds(dto.selectedBranch);
     const outletIds = extractNumericIds(dto.selectedOutlet);
@@ -182,6 +194,8 @@ export class UsersService {
           fullName: dto.fullName.trim(),
           email: dto.email.trim().toLowerCase(),
           passwordHash,
+          isTemporaryPassword: !hasExplicitPassword,
+          requireChangeOnLogin: !hasExplicitPassword,
           empNo: dto.empNo || null,
           designation: dto.designation || role.name,
           contactNo: dto.contactNo || null,
@@ -275,6 +289,8 @@ export class UsersService {
               canEdit: true,
               canApprove: true,
               canExport: true,
+              createUserId: actor.id,
+              updateUserId: actor.id,
             })),
             skipDuplicates: true,
           });
@@ -292,6 +308,8 @@ export class UsersService {
                 canEdit: d?.canEdit ?? false,
                 canApprove: d?.canApprove ?? false,
                 canExport: d?.canExport ?? false,
+                createUserId: actor.id,
+                updateUserId: actor.id,
               };
             }),
             skipDuplicates: true,
@@ -328,9 +346,33 @@ export class UsersService {
   }
 
   async update(actor: AuthenticatedUser, id: number, dto: UpdateUserDto) {
-    const existing = await this.prisma.user.findUnique({ where: { id } });
+    const existing = await this.prisma.user.findUnique({
+      where: { id },
+      include: {
+        role: true,
+        companyAccess: true,
+        branchAccess: true,
+        outletAccess: true,
+        departmentAccess: true,
+      },
+    });
     if (!existing) {
       throw new NotFoundException(`User #${id} not found.`);
+    }
+    if (existing.username === 'system') {
+      throw new ForbiddenException('The internal system automation account cannot be modified.');
+    }
+    if (existing.role.code === 'ADM' && actor.roleCode !== 'ADM') {
+      throw new ForbiddenException('Only System Administrators can modify ADM accounts.');
+    }
+    if (dto.systemUserRoleId !== undefined) {
+      const nextRole = await this.prisma.role.findUnique({ where: { id: dto.systemUserRoleId } });
+      if (!nextRole) {
+        throw new BadRequestException(`Role ID ${dto.systemUserRoleId} does not exist.`);
+      }
+      if (nextRole.code === 'ADM' && actor.roleCode !== 'ADM') {
+        throw new ForbiddenException('Only System Administrators can assign the ADM role.');
+      }
     }
 
     let userGroupDbId: number | null | undefined = undefined;
@@ -423,12 +465,45 @@ export class UsersService {
       }
 
       if (this.changeLogService) {
+        const oldCompanies = existing.companyAccess.map((c) => c.companyId).sort((a, b) => a - b);
+        const oldBranches = existing.branchAccess.map((b) => b.branchId).sort((a, b) => a - b);
+        const oldOutlets = existing.outletAccess.map((o) => o.outletId).sort((a, b) => a - b);
+        const oldDepts = existing.departmentAccess.map((d) => d.departmentId).sort((a, b) => a - b);
+        const nextCompanies = dto.selectedBusiness !== undefined ? extractNumericIds(dto.selectedBusiness).sort((a, b) => a - b) : oldCompanies;
+        const nextBranches = dto.selectedBranch !== undefined ? extractNumericIds(dto.selectedBranch).sort((a, b) => a - b) : oldBranches;
+        const nextOutlets = dto.selectedOutlet !== undefined ? extractNumericIds(dto.selectedOutlet).sort((a, b) => a - b) : oldOutlets;
+        const nextDepts = dto.selectedDepartment !== undefined ? extractNumericIds(dto.selectedDepartment).sort((a, b) => a - b) : oldDepts;
+
         await this.changeLogService.logUpdate({
           tableName: 'User',
           recordId: id,
           recordCode: updatedUser.username,
-          oldValues: existing,
-          newValues: updatedUser,
+          oldValues: {
+            fullName: existing.fullName,
+            email: existing.email,
+            empNo: existing.empNo,
+            designation: existing.designation,
+            roleId: existing.roleId,
+            userGroupId: existing.userGroupId,
+            isActive: existing.isActive,
+            companyIds: oldCompanies,
+            branchIds: oldBranches,
+            outletIds: oldOutlets,
+            departmentIds: oldDepts,
+          },
+          newValues: {
+            fullName: updatedUser.fullName,
+            email: updatedUser.email,
+            empNo: updatedUser.empNo,
+            designation: updatedUser.designation,
+            roleId: updatedUser.roleId,
+            userGroupId: updatedUser.userGroupId,
+            isActive: updatedUser.isActive,
+            companyIds: nextCompanies,
+            branchIds: nextBranches,
+            outletIds: nextOutlets,
+            departmentIds: nextDepts,
+          },
           actor,
           tx,
         });
@@ -486,8 +561,17 @@ export class UsersService {
   }
 
   async toggleStatus(actor: AuthenticatedUser, id: number) {
-    const existing = await this.prisma.user.findUnique({ where: { id } });
+    const existing = await this.prisma.user.findUnique({
+      where: { id },
+      include: { role: true },
+    });
     if (!existing) throw new NotFoundException(`User #${id} not found.`);
+    if (existing.username === 'system') {
+      throw new ForbiddenException('The internal system automation account cannot be activated or modified.');
+    }
+    if (existing.role.code === 'ADM' && actor.roleCode !== 'ADM') {
+      throw new ForbiddenException('Only System Administrators can toggle ADM account status.');
+    }
     if (existing.id === actor.id) {
       throw new BadRequestException('You cannot deactivate your own active account.');
     }
@@ -532,8 +616,17 @@ export class UsersService {
   }
 
   async resetPassword(actor: AuthenticatedUser, id: number, dto: ResetPasswordDto) {
-    const existing = await this.prisma.user.findUnique({ where: { id } });
+    const existing = await this.prisma.user.findUnique({
+      where: { id },
+      include: { role: true },
+    });
     if (!existing) throw new NotFoundException(`User #${id} not found.`);
+    if (existing.username === 'system') {
+      throw new ForbiddenException('The internal system automation account cannot have its password reset.');
+    }
+    if (existing.role.code === 'ADM' && actor.roleCode !== 'ADM') {
+      throw new ForbiddenException('Only System Administrators can reset ADM passwords.');
+    }
     const passwordHash = await bcrypt.hash(dto.newPassword, 12);
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.user.update({

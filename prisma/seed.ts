@@ -565,6 +565,7 @@ async function main() {
       const isOpsMod = ['cashDeposit', 'pettyCash', 'salesRecon', 'reports', 'printFormats'].includes(mod);
       const isApproveMod = ['cashDeposit', 'pettyCash', 'salesRecon', 'approvals'].includes(mod);
 
+      const isAdminOnlyMod = ['userManagement', 'rolesPermissions'].includes(mod);
       await prisma.rolePermission.upsert({
         where: { roleId_moduleKey: { roleId: role.id, moduleKey: mod } },
         update: {},
@@ -572,11 +573,11 @@ async function main() {
           roleId: role.id,
           moduleKey: mod,
           canRead: isAdm || isMgr || isChk || isOpsMod || (rd.code === 'AST-CSH' && mod === 'approvals'),
-          canCreate: isAdm || isMgr || isChk || (['OUT-CSH', 'AST-CSH', 'COL-OFF'].includes(rd.code) && isOpsMod),
-          canUpdate: isAdm || isMgr || isChk || (['OUT-CSH', 'AST-CSH', 'COL-OFF'].includes(rd.code) && isOpsMod),
-          canDelete: isAdm || isMgr,
+          canCreate: isAdm || (isMgr && !isAdminOnlyMod) || (isChk && !isAdminOnlyMod) || (['OUT-CSH', 'AST-CSH', 'COL-OFF'].includes(rd.code) && isOpsMod),
+          canUpdate: isAdm || (isMgr && !isAdminOnlyMod) || (isChk && !isAdminOnlyMod) || (['OUT-CSH', 'AST-CSH', 'COL-OFF'].includes(rd.code) && isOpsMod),
+          canDelete: isAdm || (isMgr && !isAdminOnlyMod),
           canApprove: isAdm || ((isMgr || isChk) && isApproveMod) || (rd.code === 'AST-CSH' && mod === 'cashDeposit'),
-          canUnblock: isAdm || isMgr || (isChk && mod === 'auditExport'),
+          canUnblock: isAdm || (isMgr && !isAdminOnlyMod) || (isChk && mod === 'auditExport'),
         },
       });
     }
@@ -954,7 +955,15 @@ async function main() {
     },
   });
 
-  // 31. Sample Operational Transactions (Idempotent by unique DocNo)
+  // 31. Optional Sample Operational Transactions
+  // Production/default seed MUST NOT auto-insert sample financial transactions.
+  // Set SEED_DEMO_TRANSACTIONS=true (and NODE_ENV !== 'production') only for isolated test/dev fixtures.
+  if (process.env.SEED_DEMO_TRANSACTIONS !== 'true' || process.env.NODE_ENV === 'production') {
+    console.log('✅ Configuration & Master Data seed completed (no sample financial transactions inserted).');
+    return;
+  }
+
+  console.log('ℹ️ SEED_DEMO_TRANSACTIONS=true enabled (non-production): seeding isolated test transaction fixtures...');
   const dep1 = await prisma.cashDeposit.upsert({
     where: { docNo: 'CCD-2026-0042' },
     update: {},

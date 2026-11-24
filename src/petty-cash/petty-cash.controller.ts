@@ -216,7 +216,7 @@ export class PettyCashController {
   @Get('iou-aging')
   @RequirePermission('pettyCash', 'read')
   @ApiOperation({ summary: 'Get live server-computed Employee Advance Outstanding (IOU) Aging Matrix' })
-  getIouAging() {
-    return this.service.getIouAging();
+  getIouAging(@CurrentUser() user: AuthenticatedUser) {
+    return this.service.getIouAging(user);
   }
 }

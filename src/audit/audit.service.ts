@@ -1,11 +1,12 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { ChangeLogService } from '../common/audit/audit.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { getEffectiveScope } from '../common/utils/scope.util';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
-import { toNumber, toPrismaDecimal } from '../common/utils/decimal.util';
+import { toDecimal, toNumber, toPrismaDecimal } from '../common/utils/decimal.util';
 import { CreateAuditCommentDto, GenerateAuditExportDto } from './dto/audit.dto';
 
 export interface LogAuditInput {
@@ -52,14 +53,28 @@ export class AuditService {
     });
   }
 
-  async getLogs(query: {
-    entityType?: string;
-    entityId?: number;
-    docNo?: string;
-    search?: string;
-    page?: number;
-    limit?: number;
-  }) {
+  async getLogs(
+    user: AuthenticatedUser,
+    query: {
+      entityType?: string;
+      entityId?: number;
+      docNo?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+    },
+  ) {
+    const isGlobalAuditor =
+      user.roleCode === 'ADM' || Boolean(user.permissions?.auditExport?.read);
+    if (!isGlobalAuditor) {
+      if (!query.entityType || !query.entityId) {
+        throw new ForbiddenException(
+          'Global audit log access requires auditExport:read permission.',
+        );
+      }
+      await this.assertAuditTargetAccess(user, query.entityType, Number(query.entityId));
+    }
+
     const page = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
 
@@ -111,7 +126,52 @@ export class AuditService {
     };
   }
 
+  private async assertAuditTargetAccess(
+    user: AuthenticatedUser,
+    entityType: string,
+    entityId: number,
+  ): Promise<void> {
+    const scope = await getEffectiveScope(this.prisma, user);
+    let doc: { companyId?: number | null; branchId?: number | null; outletId?: number | null } | null = null;
+    if (entityType === 'cash_deposit') {
+      doc = await this.prisma.cashDeposit.findUnique({
+        where: { id: entityId },
+        select: { companyId: true, branchId: true, outletId: true },
+      });
+    } else if (entityType === 'petty_cash_request') {
+      doc = await this.prisma.pettyCashRequest.findUnique({
+        where: { id: entityId },
+        select: { companyId: true, branchId: true },
+      });
+    } else if (entityType === 'sales_reconciliation') {
+      doc = await this.prisma.salesReconciliation.findUnique({
+        where: { id: entityId },
+        select: { companyId: true, branchId: true, outletId: true },
+      });
+    } else if (user.roleCode !== 'ADM' && !user.permissions?.auditExport?.read) {
+      throw new ForbiddenException(`Not authorized to access audit logs for "${entityType}".`);
+    } else {
+      return;
+    }
+
+    if (!doc) {
+      throw new NotFoundException(`Target ${entityType} #${entityId} not found.`);
+    }
+    if (!scope.unrestricted) {
+      if (doc.companyId && !scope.companyIds.includes(doc.companyId)) {
+        throw new ForbiddenException('Target document is outside your company scope.');
+      }
+      if (doc.branchId && !scope.branchIds.includes(doc.branchId)) {
+        throw new ForbiddenException('Target document is outside your branch scope.');
+      }
+      if (doc.outletId && !scope.outletIds.includes(doc.outletId)) {
+        throw new ForbiddenException('Target document is outside your outlet scope.');
+      }
+    }
+  }
+
   async addComment(user: AuthenticatedUser, dto: CreateAuditCommentDto) {
+    await this.assertAuditTargetAccess(user, dto.entityType, dto.entityId);
     await this.log({
       entityType: dto.entityType,
       entityId: dto.entityId,
@@ -227,7 +287,7 @@ export class AuditService {
     ];
 
     const totalBaseAmount = toNumber(
-      records.reduce((sum, rec) => sum + rec.amountBase, 0),
+      records.reduce((sum, rec) => sum.plus(toDecimal(rec.amountBase)), toDecimal(0)),
     );
 
     return {
@@ -246,8 +306,8 @@ export class AuditService {
     });
 
     const dateStamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const countToday = await this.prisma.auditExportBatch.count();
-    const batchCode = `AUDIT-${dateStamp}-${String(countToday + 1).padStart(3, '0')}`;
+    const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const batchCode = `AUDIT-${dateStamp}-${suffix}`;
 
     const batch = await this.prisma.$transaction(async (tx) => {
       const created = await tx.auditExportBatch.create({
@@ -324,7 +384,11 @@ export class AuditService {
         `Amount (${staged.baseCurrency})`,
         'Status',
       ];
-      const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+      const escapeCsv = (val: unknown) => {
+        const raw = String(val ?? '');
+        const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+        return `"${safe.replace(/"/g, '""')}"`;
+      };
       const lines = [
         headers.join(','),
         ...staged.records.map((r) =>

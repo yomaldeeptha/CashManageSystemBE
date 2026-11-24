@@ -11,7 +11,7 @@ import { AuditService } from '../audit/audit.service';
 import { ChangeLogService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
-import { getEffectiveScope } from '../common/utils/scope.util';
+import { applyEntityScopeToWhere, getEffectiveScope, isUnrestrictedAdmin } from '../common/utils/scope.util';
 import { toDecimal, toNumber, toPrismaDecimal } from '../common/utils/decimal.util';
 import {
   ApprovalDecisionDto,
@@ -485,6 +485,8 @@ export class ApprovalsService {
         currentStageOrder: 1,
         totalStages,
         status: 'Pending',
+        createUserId: params.submittedById,
+        updateUserId: params.submittedById,
       },
     });
   }
@@ -500,14 +502,12 @@ export class ApprovalsService {
       status: { in: ['Pending', 'In Review'] },
     };
 
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      if (scope.outletIds.length > 0) {
-        where.OR = [{ outletId: null }, { outletId: { in: scope.outletIds } }];
-      }
-    }
-    if (companyId) where.companyId = companyId;
-    if (outletId && outletId !== 'all') where.outletId = Number(outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId, outletId },
+      { includeOutlet: true, allowNullOutlet: true },
+    );
 
     if (filterType === 'deposit') where.entityType = 'cash_deposit';
     else if (filterType === 'petty') where.entityType = 'petty_cash_request';
@@ -643,6 +643,20 @@ export class ApprovalsService {
       );
     }
 
+    // Entity scope enforcement for non-ADM approvers (when scope info is present on instance)
+    if (!isUnrestrictedAdmin(actor)) {
+      if (instance.companyId && actor.companyIds.length > 0 && !actor.companyIds.includes(instance.companyId)) {
+        throw new ForbiddenException(
+          'You are not authorized to decide approvals outside your assigned Company scope.',
+        );
+      }
+      if (instance.outletId && actor.outletIds.length > 0 && !actor.outletIds.includes(instance.outletId)) {
+        throw new ForbiddenException(
+          'You are not authorized to decide approvals outside your assigned Outlet scope.',
+        );
+      }
+    }
+
     if ((dto.decision === 'reject' || dto.decision === 'clarify') && !dto.comment?.trim()) {
       throw new BadRequestException(
         'A clear operational reason/comment is required when rejecting or returning a document for clarification.',
@@ -689,6 +703,8 @@ export class ApprovalsService {
           decidedById: actor.id,
           decision: dto.decision,
           comment: dto.comment?.trim() || null,
+          createUserId: actor.id,
+          updateUserId: actor.id,
         },
       });
 
@@ -723,9 +739,20 @@ export class ApprovalsService {
         nextDocStatus = 'Rejected';
         auditStep = `Returned for Clarification at Stage ${instance.currentStageOrder}: ${dto.comment}`;
       } else {
-        nextInstanceStatus = 'Rejected';
-        nextDocStatus = 'Rejected';
-        auditStep = `Rejected at Stage ${instance.currentStageOrder}: ${dto.comment}`;
+        const rejectionsInStage =
+          instance.decisions.filter(
+            (d) => d.stageOrder === instance.currentStageOrder && d.decision === 'reject',
+          ).length + 1;
+        const requiredRejects = activeStage?.noOfReject || 1;
+        if (rejectionsInStage < requiredRejects) {
+          nextInstanceStatus = 'In Review';
+          nextDocStatus = 'In Review';
+          auditStep = `Stage ${instance.currentStageOrder} partial rejection (${rejectionsInStage}/${requiredRejects}): ${dto.comment}`;
+        } else {
+          nextInstanceStatus = 'Rejected';
+          nextDocStatus = 'Rejected';
+          auditStep = `Rejected at Stage ${instance.currentStageOrder}: ${dto.comment}`;
+        }
       }
 
       const updatedInstance = await tx.approvalInstance.update({

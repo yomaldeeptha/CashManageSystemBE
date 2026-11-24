@@ -294,11 +294,20 @@ export class ScreensService {
   }
 
   async copyAuthorizations(actor: AuthenticatedUser, dto: CopyScreenAuthDto) {
-    const sourceAuths = await this.prisma.userScreenAuthorization.findMany({
-      where: { userId: dto.sourceUserId },
-    });
     await this.prisma.$transaction(async (tx) => {
-      const targetUser = await tx.user.findUnique({ where: { id: dto.targetUserId } });
+      const [sourceUser, targetUser] = await Promise.all([
+        tx.user.findUnique({ where: { id: dto.sourceUserId } }),
+        tx.user.findUnique({ where: { id: dto.targetUserId } }),
+      ]);
+      if (!sourceUser) {
+        throw new NotFoundException(`Source user #${dto.sourceUserId} not found.`);
+      }
+      if (!targetUser) {
+        throw new NotFoundException(`Target user #${dto.targetUserId} not found.`);
+      }
+      const sourceAuths = await tx.userScreenAuthorization.findMany({
+        where: { userId: dto.sourceUserId },
+      });
       await tx.userScreenAuthorization.deleteMany({ where: { userId: dto.targetUserId } });
       if (sourceAuths.length > 0) {
         await tx.userScreenAuthorization.createMany({
@@ -321,9 +330,9 @@ export class ScreensService {
           action: 'STATUS_CHANGE',
           tableName: 'UserScreenAuthorization',
           recordId: dto.targetUserId,
-          recordCode: targetUser?.username || `USR-${dto.targetUserId}`,
+          recordCode: targetUser.username,
           newValues: { copiedFromUserId: dto.sourceUserId, screenCount: sourceAuths.length },
-          description: `Copied ${sourceAuths.length} screen authorizations from user #${dto.sourceUserId} to ${targetUser?.username || `#${dto.targetUserId}`}`,
+          description: `Copied ${sourceAuths.length} screen authorizations from ${sourceUser.username} to ${targetUser.username}`,
           actor,
           tx,
         });

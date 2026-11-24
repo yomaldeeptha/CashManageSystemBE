@@ -183,6 +183,7 @@ describe('CashDepositService', () => {
             docNo: 'CCD-2026-0042',
             collectionDate: new Date('2026-10-20T00:00:00Z'),
             totalBaseAmount: new Prisma.Decimal(2500),
+            status: 'Approved',
           },
         ]),
       },
@@ -224,7 +225,7 @@ describe('CashDepositService', () => {
     });
 
     expect(txMock.cashDeposit.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: [10] } },
+      where: { id: { in: [10] }, status: 'Approved' },
       data: { status: 'Posted', updateUserId: outletCashier.id },
     });
     expect(txMock.bankReconciliation.create).toHaveBeenCalled();
@@ -235,5 +236,69 @@ describe('CashDepositService', () => {
     const credits = gl.filter((g) => g.type.includes('Credit')).reduce((s, g) => s + g.amount, 0);
     const debits = gl.filter((g) => g.type.includes('Debit')).reduce((s, g) => s + g.amount, 0);
     expect(credits).toBe(debits);
+  });
+
+  it('blocks scoped users from escaping entity scope via query parameters on listDeposits (403)', async () => {
+    const prisma = {
+      ...makeScopeMocks(),
+      cashDeposit: { count: jest.fn(), findMany: jest.fn() },
+    } as unknown as PrismaService;
+    const service = new CashDepositService(
+      prisma,
+      { log: jest.fn() } as unknown as AuditService,
+      {} as ApprovalsService,
+      {} as ExchangeRateResolverService,
+      {} as NumberSeriesGeneratorService,
+    );
+
+    await expect(
+      service.listDeposits(outletCashier, { companyId: 2 }),
+    ).rejects.toThrow(ForbiddenException);
+
+    await expect(
+      service.listDeposits(outletCashier, { outletId: '2' }),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects bank deposit if any selected cash deposit is not Approved (prevents double deposit)', async () => {
+    const prisma = {
+      ...makeScopeMocks(),
+      currency: { findUnique: jest.fn().mockResolvedValue({ id: 1, code: 'USD', symbol: '$' }) },
+      cashDeposit: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 10,
+            docNo: 'CCD-2026-0042',
+            collectionDate: new Date('2026-10-20T00:00:00Z'),
+            totalBaseAmount: new Prisma.Decimal(2500),
+            status: 'Posted',
+          },
+        ]),
+      },
+    } as unknown as PrismaService;
+    const fxResolver = {
+      getSystemBaseCurrency: jest.fn().mockResolvedValue({ id: 1, code: 'USD', symbol: '$' }),
+    } as unknown as ExchangeRateResolverService;
+    const service = new CashDepositService(
+      prisma,
+      { log: jest.fn() } as unknown as AuditService,
+      {} as ApprovalsService,
+      fxResolver,
+      {} as NumberSeriesGeneratorService,
+    );
+
+    await expect(
+      service.createBankDeposit(outletCashier, {
+        docDate: '2026-10-20',
+        companyId: 1,
+        branchId: 1,
+        outletId: 1,
+        depositBankRefNo: 'BML-DUP-001',
+        currency: 'USD',
+        depositAccount: 'BML Corporate USD',
+        processFlowDecision: 'bank',
+        cashDepositIds: [10],
+      }),
+    ).rejects.toThrow(BadRequestException);
   });
 });

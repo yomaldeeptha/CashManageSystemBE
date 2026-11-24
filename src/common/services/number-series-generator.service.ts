@@ -63,15 +63,26 @@ export class NumberSeriesGeneratorService {
       );
     }
 
-    const allocatedNo = this.formatDocumentNo(selected);
-
-    await db.numberSeries.update({
+    // Increment atomically first so concurrent transactions receive strictly distinct sequence numbers
+    const updated = await db.numberSeries.update({
       where: { id: selected.id },
       data: {
         nextNumber: { increment: 1 },
       },
     });
 
-    return allocatedNo;
+    const allocatedSeq = updated.nextNumber - 1;
+    if (allocatedSeq > updated.lastNumber) {
+      throw new BadRequestException(
+        `Number series "${updated.seriesName}" (${updated.seriesId}) has exhausted its maximum limit (${updated.lastNumber}).`,
+      );
+    }
+
+    return this.formatDocumentNo({
+      prefix: updated.prefix,
+      suffix: updated.suffix,
+      nextNumber: allocatedSeq,
+      numDigits: updated.numDigits,
+    });
   }
 }

@@ -551,18 +551,29 @@ export class MasterDataService {
       }
 
       case 'userScreenAccess': {
-        const roles = await this.prisma.role.findMany({
-          include: { permissions: true },
-          orderBy: { id: 'asc' },
-        });
-        const totalScreens = await this.prisma.screen.count({ where: { isActive: true } });
+        const [roles, totalScreens, userScreenAuths] = await Promise.all([
+          this.prisma.role.findMany({
+            include: { permissions: true, users: { select: { id: true } } },
+            orderBy: { id: 'asc' },
+          }),
+          this.prisma.screen.count({ where: { isActive: true } }),
+          this.prisma.userScreenAuthorization.findMany({
+            where: { canAccess: true },
+            select: { userId: true, screenId: true },
+          }),
+        ]);
         rows = roles.map((r) => {
-          const readableModules = r.permissions.filter((p) => p.canRead).length;
+          const roleUserIds = new Set(r.users.map((u) => u.id));
+          const distinctScreens = new Set(
+            userScreenAuths
+              .filter((sa) => roleUserIds.has(sa.userId))
+              .map((sa) => sa.screenId),
+          );
           return {
             id: r.id,
             roleId: r.id,
             roleName: r.name,
-            accessibleScreens: r.code === 'ADM' ? totalScreens : Math.min(totalScreens, readableModules * 3),
+            accessibleScreens: r.code === 'ADM' ? totalScreens : distinctScreens.size,
             hasApprovalRights: r.code === 'ADM' || r.permissions.some((p) => p.canApprove),
             canExportAudit: r.code === 'ADM' || r.permissions.some((p) => p.moduleKey === 'auditExport' && p.canUnblock),
             status: r.isActive ? 'Active' : 'Inactive',
@@ -1259,7 +1270,13 @@ export class MasterDataService {
             },
           });
           break;
-        case 'floatAccount':
+        case 'floatAccount': {
+          const nextBaseLimit =
+            payload.baseLimit !== undefined ? this.num(payload.baseLimit, -1) : undefined;
+          if (nextBaseLimit !== undefined && nextBaseLimit < 0) {
+            throw new BadRequestException('Float base limit cannot be negative.');
+          }
+          // Financial integrity: currentBalance must only change through verified vouchers/transactions
           updatedRecord = await tx.floatAccount.update({
             where: { id },
             data: {
@@ -1268,17 +1285,15 @@ export class MasterDataService {
               ...(payload.cashierId !== undefined
                 ? { assignedEmployeeId: this.num(payload.cashierId) }
                 : {}),
-              ...(payload.baseLimit !== undefined
-                ? { baseLimit: toPrismaDecimal(this.num(payload.baseLimit, 0)) }
-                : {}),
-              ...(payload.currentBalance !== undefined
-                ? { currentBalance: toPrismaDecimal(this.num(payload.currentBalance, 0)) }
+              ...(nextBaseLimit !== undefined
+                ? { baseLimit: toPrismaDecimal(nextBaseLimit) }
                 : {}),
               isActive,
               ...updateStamp,
             },
           });
           break;
+        }
         case 'glAccounts':
           updatedRecord = await tx.glAccount.update({
             where: { id },
@@ -1345,28 +1360,38 @@ export class MasterDataService {
             },
           });
           break;
-        case 'budget':
+        case 'budget': {
+          const oldBudget = oldRecord as { allocatedAmount?: unknown; consumedAmount?: unknown; monthlyLimit?: unknown };
+          const nextAllocated =
+            payload.allocatedUSD !== undefined
+              ? this.num(payload.allocatedUSD, -1)
+              : toNumber(oldBudget.allocatedAmount as string);
+          const nextMonthly =
+            payload.monthlyLimitUSD !== undefined
+              ? this.num(payload.monthlyLimitUSD, -1)
+              : toNumber(oldBudget.monthlyLimit as string);
+          if (nextAllocated < 0 || nextMonthly < 0) {
+            throw new BadRequestException('Budget allocated amount and monthly limit cannot be negative.');
+          }
+          // Preserve authoritative consumedAmount; recompute availableAmount server-side
+          const currentConsumed = toNumber(oldBudget.consumedAmount as string);
+          const recomputedAvailable = Math.max(0, nextMonthly - currentConsumed);
           updatedRecord = await tx.budget.update({
             where: { id },
             data: {
               ...(payload.fiscalYear !== undefined ? { fiscalYear: this.str(payload.fiscalYear) } : {}),
               ...(payload.allocatedUSD !== undefined
-                ? { allocatedAmount: toPrismaDecimal(this.num(payload.allocatedUSD, 0)) }
+                ? { allocatedAmount: toPrismaDecimal(nextAllocated) }
                 : {}),
               ...(payload.monthlyLimitUSD !== undefined
-                ? { monthlyLimit: toPrismaDecimal(this.num(payload.monthlyLimitUSD, 0)) }
-                : {}),
-              ...(payload.consumedUSD !== undefined
-                ? { consumedAmount: toPrismaDecimal(this.num(payload.consumedUSD, 0)) }
-                : {}),
-              ...(payload.availableUSD !== undefined
-                ? { availableAmount: toPrismaDecimal(this.num(payload.availableUSD, 0)) }
+                ? { monthlyLimit: toPrismaDecimal(nextMonthly), availableAmount: toPrismaDecimal(recomputedAvailable) }
                 : {}),
               isActive,
               ...updateStamp,
             },
           });
           break;
+        }
         case 'cashAdvanceType':
           updatedRecord = await tx.cashAdvanceType.update({
             where: { id },
@@ -1520,6 +1545,18 @@ export class MasterDataService {
       const existing = await delegate.findUnique({ where: { id } });
       if (!existing) throw new NotFoundException(`${tableName} record #${id} not found.`);
       const nextActive = !Boolean(existing.isActive);
+      if (!nextActive) {
+        if (catalog === 'currency' && existing.isBase) {
+          throw new BadRequestException(
+            'Cannot deactivate the active System Primary Base Currency. Switch the base currency first.',
+          );
+        }
+        if (catalog === 'floatAccount' && toNumber(existing.currentBalance as string) > 0) {
+          throw new BadRequestException(
+            'Cannot deactivate a Float Account with a positive remaining balance.',
+          );
+        }
+      }
       const updated = await delegate.update({
         where: { id },
         data: { isActive: nextActive, updateUserId: actor.id },
@@ -1571,6 +1608,69 @@ export class MasterDataService {
       const oldRecord = await delegate.findUnique({ where: { id } });
       if (!oldRecord) {
         throw new NotFoundException(`${tableName} record #${id} not found.`);
+      }
+
+      // Dependency protection before deleting master records referenced by financial transactions
+      if (catalog === 'currency' && oldRecord.isBase) {
+        throw new BadRequestException('Cannot delete the active System Primary Base Currency.');
+      }
+      if (catalog === 'floatAccount') {
+        if (toNumber(oldRecord.currentBalance as string) > 0) {
+          throw new BadRequestException('Cannot delete a Float Account with a non-zero balance.');
+        }
+        const [payRefs, advRefs, reimbRefs] = await Promise.all([
+          tx.cashierPayment.count({ where: { floatAccountId: id } }),
+          tx.pettyCashAdvance.count({ where: { floatAccountId: id } }),
+          tx.floatReimbursement.count({ where: { floatAccountId: id } }),
+        ]);
+        if (payRefs + advRefs + reimbRefs > 0) {
+          throw new BadRequestException(
+            'Cannot delete this Float Account because it is referenced by existing financial transactions. Deactivate it instead.',
+          );
+        }
+      }
+      if (catalog === 'bankAccount') {
+        const [depRefs, setRefs] = await Promise.all([
+          tx.outletBankDeposit.count({ where: { bankAccountId: id } }),
+          tx.mainCashierSettlement.count({ where: { toBankAccountId: id } }),
+        ]);
+        if (depRefs + setRefs > 0) {
+          throw new BadRequestException(
+            'Cannot delete this Bank Account because it is referenced by existing deposits/settlements. Deactivate it instead.',
+          );
+        }
+      }
+      if (catalog === 'vendor') {
+        const [payRefs, mainPayRefs] = await Promise.all([
+          tx.cashierPayment.count({ where: { vendorId: id } }),
+          tx.mainCashierPayment.count({ where: { vendorId: id } }),
+        ]);
+        if (payRefs + mainPayRefs > 0) {
+          throw new BadRequestException(
+            'Cannot delete this Vendor because it is referenced by payment vouchers. Deactivate it instead.',
+          );
+        }
+      }
+      if (catalog === 'employee') {
+        const [depRefs, pcrRefs, payRefs, srRefs] = await Promise.all([
+          tx.cashDeposit.count({ where: { OR: [{ cashierId: id }, { cashCollectorId: id }] } }),
+          tx.pettyCashRequest.count({ where: { requestedById: id } }),
+          tx.cashierPayment.count({ where: { cashierId: id } }),
+          tx.salesReconciliation.count({ where: { cashierId: id } }),
+        ]);
+        if (depRefs + pcrRefs + payRefs + srRefs > 0) {
+          throw new BadRequestException(
+            'Cannot delete this Employee because they are referenced by financial transactions. Deactivate them instead.',
+          );
+        }
+      }
+      if (catalog === 'shift') {
+        const srRefs = await tx.salesReconciliation.count({ where: { shiftId: id } });
+        if (srRefs > 0) {
+          throw new BadRequestException(
+            'Cannot delete this Shift because it is referenced by sales reconciliations. Deactivate it instead.',
+          );
+        }
       }
 
       await delegate.delete({ where: { id } });

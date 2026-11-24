@@ -1,6 +1,8 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermission } from '../common/decorators/auth.decorators';
+import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { PrintFormatsService } from './print-formats.service';
 
 @ApiTags('Print Formats')
@@ -19,7 +21,7 @@ export class PrintFormatsController {
   @Get(':key/preview')
   @RequirePermission('printFormats', 'read')
   @ApiOperation({ summary: 'Fetch live document preview data for a print format template' })
-  preview(@Param('key') key: string) {
-    return this.service.getPreviewData(key);
+  preview(@CurrentUser() user: AuthenticatedUser, @Param('key') key: string) {
+    return this.service.getPreviewData(user, key);
   }
 }

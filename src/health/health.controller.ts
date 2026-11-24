@@ -27,12 +27,10 @@ export class HealthController {
     }
 
     let neonServerless = 'skipped';
-    let databaseName: string | undefined;
     if (this.databaseService) {
       try {
-        const ping = await this.databaseService.ping();
+        await this.databaseService.ping();
         neonServerless = 'connected';
-        databaseName = ping.database;
       } catch {
         neonServerless = 'disconnected';
       }
@@ -44,7 +42,6 @@ export class HealthController {
       version: '1.0.0',
       database,
       neonServerless,
-      ...(databaseName ? { databaseName } : {}),
       latencyMs,
       timestamp: new Date().toISOString(),
     };

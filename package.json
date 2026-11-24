@@ -19,12 +19,12 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "prisma:seed": "ts-node --compiler-options {\"module\":\"commonjs\"} prisma/seed.ts",
+    "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio",
     "vercel-build": "prisma generate && nest build"
   },
   "prisma": {
-    "seed": "ts-node --compiler-options {\"module\":\"commonjs\"} prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {
     "@neon/config": "^1.14.6",

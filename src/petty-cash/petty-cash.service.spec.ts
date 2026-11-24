@@ -1,3 +1,4 @@
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PettyCashService } from './petty-cash.service';
 import { PrismaService } from '../database/prisma.service';
@@ -140,5 +141,109 @@ describe('PettyCashService', () => {
     expect(aging[1].bucket30_60).toBe(350);
     expect(aging[1].bucket0_30).toBe(0);
     expect(aging[1].bucket60_90).toBe(0);
+  });
+
+  it('rejects multi-disbursement petty cash advances that exceed the approved request cap', async () => {
+    const prisma = {
+      company: { findUnique: jest.fn().mockResolvedValue({ id: 1, name: 'Brew & Feast' }) },
+      branch: {
+        findMany: jest.fn().mockResolvedValue([{ id: 1, companyId: 1 }]),
+        findUnique: jest.fn().mockResolvedValue({ id: 1, companyId: 1 }),
+      },
+      outlet: {
+        findMany: jest.fn().mockResolvedValue([{ id: 1, branchId: 1 }]),
+        findUnique: jest.fn().mockResolvedValue({ id: 1, branchId: 1, branch: { id: 1, companyId: 1 } }),
+      },
+      currency: {
+        findFirst: jest.fn().mockResolvedValue({ id: 1, code: 'USD' }),
+        findUnique: jest.fn().mockResolvedValue({ id: 1, code: 'USD' }),
+      },
+      $transaction: jest.fn().mockImplementation(async (cb) =>
+        cb({
+          pettyCashRequest: {
+            findUnique: jest.fn().mockResolvedValue({
+              id: 10,
+              requestId: 'REQ-010',
+              status: 'Paid',
+              requestAmount: new Prisma.Decimal(500),
+              approvedAmount: new Prisma.Decimal(500),
+              paidAmount: new Prisma.Decimal(400),
+            }),
+          },
+        }),
+      ),
+    } as unknown as PrismaService;
+
+    const fx = {
+      getSystemBaseCurrency: jest.fn().mockResolvedValue({ code: 'USD', symbol: '$' }),
+      convertToBase: jest.fn().mockResolvedValue({
+        baseCurrency: 'USD',
+        rate: new Prisma.Decimal(1),
+        baseAmount: new Prisma.Decimal(150),
+      }),
+    } as unknown as ExchangeRateResolverService;
+
+    const service = new PettyCashService(
+      prisma,
+      {} as AuditService,
+      {} as ApprovalsService,
+      {} as NotificationsService,
+      fx,
+      {} as NumberSeriesGeneratorService,
+    );
+
+    await expect(
+      service.createAdvance(cashierUser, {
+        docDate: '2026-10-19',
+        requestId: 10,
+        companyId: 1,
+        branchId: 1,
+        outletId: 1,
+        amountPaid: 150,
+        currency: 'USD',
+        paymentType: 'Cash Handover',
+        bankOrCash: 'Vault Float',
+      } as any),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('enforces Maker != Checker on bill submission verification', async () => {
+    const prisma = {
+      company: { findUnique: jest.fn().mockResolvedValue({ id: 1, name: 'Brew & Feast' }) },
+      branch: {
+        findMany: jest.fn().mockResolvedValue([{ id: 1, companyId: 1 }]),
+        findUnique: jest.fn().mockResolvedValue({ id: 1, companyId: 1 }),
+      },
+      outlet: {
+        findMany: jest.fn().mockResolvedValue([{ id: 1, branchId: 1 }]),
+        findUnique: jest.fn().mockResolvedValue({ id: 1, branchId: 1, branch: { id: 1, companyId: 1 } }),
+      },
+      pettyCashBillSubmission: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 55,
+          docNo: 'BSUB-2026-0055',
+          companyId: 1,
+          branchId: 1,
+          outletId: 1,
+          status: 'Pending Verification',
+          createUserId: managerUser.id,
+          createdById: managerUser.id,
+          totalBillAmount: new Prisma.Decimal(100),
+        }),
+      },
+    } as unknown as PrismaService;
+
+    const service = new PettyCashService(
+      prisma,
+      {} as AuditService,
+      {} as ApprovalsService,
+      {} as NotificationsService,
+      {} as ExchangeRateResolverService,
+      {} as NumberSeriesGeneratorService,
+    );
+
+    await expect(
+      service.verifyBillSubmission(managerUser, 55, { decision: 'approve' }),
+    ).rejects.toThrow(ForbiddenException);
   });
 });

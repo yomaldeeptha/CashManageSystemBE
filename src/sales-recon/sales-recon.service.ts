@@ -5,6 +5,7 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import Decimal from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
@@ -14,7 +15,11 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
-import { assertEntityScope, getEffectiveScope } from '../common/utils/scope.util';
+import {
+  applyEntityScopeToWhere,
+  assertEntityScope,
+  getEffectiveScope,
+} from '../common/utils/scope.util';
 import {
   formatIsoDate,
   parseDateOnly,
@@ -135,12 +140,12 @@ export class SalesReconService {
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.SalesReconciliationWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeOutlet: true },
+    );
     if (query?.status && query.status !== 'all') {
       if (query.status === 'shortage') {
         where.varianceAmount = { lt: 0 };
@@ -208,9 +213,15 @@ export class SalesReconService {
     if (editId) {
       const existing = await this.prisma.salesReconciliation.findUnique({ where: { id: editId } });
       if (!existing) throw new NotFoundException(`Sales Reconciliation #${editId} not found.`);
+      await assertEntityScope(this.prisma, user, existing);
       if (existing.isPeriodLocked || existing.status === 'Locked') {
         throw new ForbiddenException(
           `Period is locked for ${existing.docNo}. Unblock the period with Document Unblocking Authority before making edits.`,
+        );
+      }
+      if (['Approved', 'Posted'].includes(existing.status)) {
+        throw new ForbiddenException(
+          `Cannot modify ${existing.docNo} once it has been "${existing.status}".`,
         );
       }
     }
@@ -263,7 +274,13 @@ export class SalesReconService {
 
     const variance = roundMoney(totalCollectionBase.minus(netSales));
     const varianceStatus = this.computeVarianceStatus(variance, baseInfo.symbol);
-    const nextStatus = dto.status || (variance.abs().gte(0.01) ? 'In Review' : 'Submitted');
+    // Prevent client-controlled status spoofing (never accept Approved/Locked/Posted on save)
+    const nextStatus =
+      dto.status === 'Draft'
+        ? 'Draft'
+        : variance.abs().gte(0.01)
+          ? 'In Review'
+          : 'Submitted';
 
     const savedId = await this.prisma.$transaction(async (tx) => {
       let reconId = editId;
@@ -391,10 +408,10 @@ export class SalesReconService {
           where: { reconciliationId: reconId! },
         });
         if (!existingIncident) {
-          const cnt = await tx.varianceIncident.count();
+          const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
           const inc = await tx.varianceIncident.create({
             data: {
-              incidentCode: `VAR-2026-${String(cnt + 1).padStart(3, '0')}`,
+              incidentCode: `VAR-${new Date().getUTCFullYear()}-${suffix}`,
               reconciliationId: reconId!,
               incidentDate: parseDateOnly(dto.docDate),
               shiftTime: 'Shift Close',
@@ -469,11 +486,12 @@ export class SalesReconService {
     const where: Prisma.CashDepositWhereInput = {
       status: { in: ['Submitted', 'Handover Verified', 'In Review', 'Approved', 'Posted'] },
     };
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
-    }
-    if (outletId) where.outletId = outletId;
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { outletId },
+      { includeOutlet: true },
+    );
 
     const deposits = await this.prisma.cashDeposit.findMany({
       where,
@@ -509,24 +527,30 @@ export class SalesReconService {
     ]);
     if (!recon) throw new NotFoundException(`Sales Reconciliation #${reconId} not found.`);
     if (!dep) throw new NotFoundException(`Process 01 Cash Deposit #${cashDepositId} not found.`);
-    if (recon.isPeriodLocked) {
-      throw new ForbiddenException('Cannot sync envelope into a period-locked reconciliation.');
+    if (recon.isPeriodLocked || ['Locked', 'Approved', 'Posted'].includes(recon.status)) {
+      throw new ForbiddenException(
+        `Cannot sync envelope into a "${recon.status}" or period-locked reconciliation.`,
+      );
     }
     await assertEntityScope(this.prisma, user, recon);
+    await assertEntityScope(this.prisma, user, dep);
 
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
     const cashLine = recon.lines.find((l) => l.paymentTypeName.toLowerCase().includes('cash'));
 
     await this.prisma.$transaction(async (tx) => {
       if (cashLine) {
+        const baseCurrencyRec = await tx.currency.findUnique({ where: { code: baseInfo.code } });
         await tx.salesReconciliationLine.update({
           where: { id: cashLine.id },
           data: {
+            ...(baseCurrencyRec ? { currencyId: baseCurrencyRec.id } : {}),
             amount: dep.totalBaseAmount,
             exRate: toPrismaRate(1),
             baseAmount: dep.totalBaseAmount,
             autoFilledFromDepositId: dep.id,
             remarks: `Auto-filled from Process 01 ${dep.docNo} (${dep.envelopeNo})`,
+            updateUserId: user.id,
           },
         });
       }
@@ -580,15 +604,21 @@ export class SalesReconService {
     const scope = await getEffectiveScope(this.prisma, user);
     const candidates = await this.prisma.salesReconciliation.findMany({
       where: {
-        status: { in: ['Draft', 'Submitted', 'In Review'] },
+        status: { in: ['Submitted', 'In Review'] },
         isPeriodLocked: false,
         ...(scope.unrestricted ? {} : { companyId: { in: scope.companyIds }, outletId: { in: scope.outletIds } }),
       },
     });
 
     let matchedCount = 0;
+    let skippedSelfAuthored = 0;
     await this.prisma.$transaction(async (tx) => {
       for (const r of candidates) {
+        // Strict Maker != Checker control: never auto-approve caller's own submissions
+        if (r.createdById === user.id) {
+          skippedSelfAuthored += 1;
+          continue;
+        }
         if (toDecimal(r.varianceAmount).abs().lt(0.01)) {
           const next = await tx.salesReconciliation.update({
             where: { id: r.id },
@@ -601,6 +631,14 @@ export class SalesReconService {
               updateUserId: user.id,
               updatedById: user.id,
             },
+          });
+          await tx.approvalInstance.updateMany({
+            where: {
+              entityType: 'sales_reconciliation',
+              entityId: r.id,
+              status: { in: ['Pending', 'In Review'] },
+            },
+            data: { status: 'Approved', completedAt: new Date(), updateUserId: user.id },
           });
           if (this.changeLogService) {
             await this.changeLogService.logAction({
@@ -632,11 +670,28 @@ export class SalesReconService {
       }
     });
 
-    return { matchedCount, totalChecked: candidates.length };
+    return { matchedCount, skippedSelfAuthored, totalChecked: candidates.length };
   }
 
   async importBatch(user: AuthenticatedUser, dto: ImportSalesReconBatchDto) {
-    const totalSales = dto.rows.reduce((sum, r) => sum + (Number(r.shiftTotalSales) || Number(r.amount) || 0), 0);
+    // Deduplicate shiftTotalSales per unique shift so multiple tender rows do not multiply gross sales
+    const shiftSalesMap = new Map<string, Decimal>();
+    let fallbackSum = new Decimal(0);
+    for (const r of dto.rows) {
+      const shiftKey = (r.shift || 'Default').trim().toLowerCase();
+      if (r.shiftTotalSales !== undefined && Number(r.shiftTotalSales) > 0) {
+        if (!shiftSalesMap.has(shiftKey)) {
+          shiftSalesMap.set(shiftKey, toDecimal(r.shiftTotalSales));
+        }
+      } else {
+        fallbackSum = fallbackSum.plus(toDecimal(r.amount || 0));
+      }
+    }
+    const shiftSalesSum = Array.from(shiftSalesMap.values()).reduce(
+      (sum, val) => sum.plus(val),
+      new Decimal(0),
+    );
+    const totalSales = toNumber(shiftSalesSum.gt(0) ? shiftSalesSum : fallbackSum);
     return this.save(user, {
       companyId: dto.companyId,
       outletId: dto.outletId,
@@ -743,6 +798,21 @@ export class SalesReconService {
           updateUserId: user.id,
           updatedById: user.id,
         },
+      });
+      await this.approvalsService.initiateApproval({
+        entityType: 'sales_reconciliation',
+        documentKey: 'salesReconciliation',
+        entityId: id,
+        docNo: recon.docNo,
+        title: `Re-Approval (Unblocked): ${recon.docNo}`,
+        companyId: recon.companyId,
+        branchId: recon.branchId,
+        outletId: recon.outletId,
+        submittedById: recon.createdById || user.id,
+        amountBase: toNumber(recon.netSales),
+        baseCurrencyCode: recon.baseCurrencyCode,
+        varianceBase: toNumber(recon.varianceAmount),
+        tx,
       });
       if (this.changeLogService) {
         await this.changeLogService.logAction({
@@ -856,8 +926,12 @@ export class SalesReconService {
       credit: recon.netSales,
     });
 
-    const totalDebit = toNumber(journalLines.reduce((s, l) => s + l.debit, 0));
-    const totalCredit = toNumber(journalLines.reduce((s, l) => s + l.credit, 0));
+    const totalDebit = toNumber(
+      journalLines.reduce((s, l) => s.plus(toDecimal(l.debit)), new Decimal(0)),
+    );
+    const totalCredit = toNumber(
+      journalLines.reduce((s, l) => s.plus(toDecimal(l.credit)), new Decimal(0)),
+    );
 
     return {
       reconciliation: recon,

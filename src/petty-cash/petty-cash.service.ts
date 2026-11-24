@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Optional,
@@ -14,7 +15,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { NumberSeriesGeneratorService } from '../common/services/number-series-generator.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
-import { assertEntityScope, getEffectiveScope } from '../common/utils/scope.util';
+import {
+  applyEntityScopeToWhere,
+  assertEntityScope,
+  getEffectiveScope,
+} from '../common/utils/scope.util';
 import {
   formatIsoDate,
   parseDateOnly,
@@ -97,11 +102,12 @@ export class PettyCashService {
       }),
     ]);
 
-    const deptBudget = budgetMap.get(r.departmentId) || {
-      allocated: 36000,
-      monthlyLimit: 3000,
+    const existingBudget = budgetMap.get(r.departmentId);
+    const deptBudget = existingBudget || {
+      allocated: 0,
+      monthlyLimit: 0,
       consumed: 0,
-      available: 3000,
+      available: 0,
     };
 
     return {
@@ -139,6 +145,7 @@ export class PettyCashService {
       remark: r.remark || '',
       status: r.status,
       budget: {
+        configured: Boolean(existingBudget),
         total: deptBudget.monthlyLimit,
         consumed: deptBudget.consumed,
         available: deptBudget.available,
@@ -169,12 +176,12 @@ export class PettyCashService {
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.PettyCashRequestWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
-    if (query?.outletId && query.outletId !== 'all') where.outletId = Number(query.outletId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
+    );
     if (query?.category && query.category !== 'all') {
       where.expenseCategory = { name: { equals: query.category, mode: 'insensitive' } };
     }
@@ -239,7 +246,7 @@ export class PettyCashService {
     if (!expCat) throw new BadRequestException(`Expense Category ID ${dto.expenseCategoryId} does not exist.`);
 
     const { baseCurrency, baseAmount } = await this.fxResolver.convertToBase(dto.requestAmount, cur.code);
-    const status = dto.status || 'Submitted';
+    const status = dto.status === 'Draft' ? 'Draft' : 'Submitted';
 
     const createdId = await this.prisma.$transaction(async (tx) => {
       const requestId =
@@ -336,17 +343,32 @@ export class PettyCashService {
       if (body.approvedAmount <= 0 || body.approvedAmount > toNumber(req.requestAmount)) {
         throw new BadRequestException('Approved amount must be greater than 0 and not exceed requested amount.');
       }
+    }
+
+    // Enforce Maker-Checker, stage assignment & signing limits BEFORE mutating approvedAmount
+    const decisionResult = await this.approvalsService.decideByEntity(
+      user,
+      'petty_cash_request',
+      id,
+      {
+        decision: 'approve',
+        comment: body?.comment,
+      },
+    );
+
+    if (body?.approvedAmount !== undefined) {
       await this.prisma.$transaction(async (tx) => {
+        const currentReq = await tx.pettyCashRequest.findUnique({ where: { id } });
         const next = await tx.pettyCashRequest.update({
           where: { id },
           data: { approvedAmount: toPrismaDecimal(body.approvedAmount!), updateUserId: user.id },
         });
-        if (this.changeLogService) {
+        if (this.changeLogService && currentReq) {
           await this.changeLogService.logUpdate({
             tableName: 'PettyCashRequest',
             recordId: id,
             recordCode: req.requestId,
-            oldValues: req,
+            oldValues: currentReq,
             newValues: next,
             actor: user,
             tx,
@@ -355,10 +377,7 @@ export class PettyCashService {
       });
     }
 
-    return this.approvalsService.decideByEntity(user, 'petty_cash_request', id, {
-      decision: 'approve',
-      comment: body?.comment,
-    });
+    return decisionResult;
   }
 
   async rejectRequest(user: AuthenticatedUser, id: number, body: { reason?: string; comment?: string }) {
@@ -376,7 +395,7 @@ export class PettyCashService {
     const req = await this.prisma.pettyCashRequest.findUnique({ where: { id } });
     if (!req) throw new NotFoundException(`Petty Cash Request #${id} not found.`);
     await assertEntityScope(this.prisma, user, req);
-    if (['Paid', 'Settled', 'Cancelled'].includes(req.status)) {
+    if (['Approved', 'Paid', 'Settled', 'Cancelled'].includes(req.status)) {
       throw new BadRequestException(`Cannot cancel Petty Cash Request in status "${req.status}".`);
     }
     const note = reason?.trim() || 'Cancelled by requester/finance';
@@ -388,6 +407,14 @@ export class PettyCashService {
           remark: `${req.remark ? `${req.remark} | ` : ''}Cancelled: ${note}`,
           updateUserId: user.id,
         },
+      });
+      await tx.approvalInstance.updateMany({
+        where: {
+          entityType: 'petty_cash_request',
+          entityId: id,
+          status: { in: ['Pending', 'In Review'] },
+        },
+        data: { status: 'Cancelled', completedAt: new Date(), updateUserId: user.id },
       });
       if (this.changeLogService) {
         await this.changeLogService.logAction({
@@ -429,11 +456,12 @@ export class PettyCashService {
     const canSeeHiddenApproved = this.isApproverRole(user);
 
     const where: Prisma.PettyCashAdvanceWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeBranch: true, includeOutlet: false },
+    );
     if (query?.category && query.category !== 'all') {
       where.expenseCategory = { equals: query.category, mode: 'insensitive' };
     }
@@ -507,14 +535,15 @@ export class PettyCashService {
           );
         }
         const cap = toDecimal(linkedReq.approvedAmount ?? linkedReq.requestAmount);
-        if (toDecimal(dto.amountPaid).gt(cap)) {
+        const cumulativePaid = toDecimal(linkedReq.paidAmount).plus(toDecimal(dto.amountPaid));
+        if (cumulativePaid.gt(cap)) {
           throw new BadRequestException(
-            `Paid advance amount (${dto.amountPaid}) cannot exceed approved request amount (${toNumber(cap)}).`,
+            `Cumulative advance disbursements (${toNumber(cumulativePaid)}) would exceed approved request amount (${toNumber(cap)}). Already paid: ${toNumber(linkedReq.paidAmount)}.`,
           );
         }
       }
 
-      // Deduct from float account if matched
+      // Deduct from float account atomically if matched (enforcing currency alignment)
       const floatAcc = dto.floatAccountId
         ? await tx.floatAccount.findUnique({ where: { id: dto.floatAccountId } })
         : dto.bankOrCash
@@ -522,16 +551,34 @@ export class PettyCashService {
           : null;
 
       if (floatAcc) {
-        const currentBal = toDecimal(floatAcc.currentBalance);
-        if (currentBal.lt(toDecimal(dto.amountPaid))) {
+        if (floatAcc.currencyId !== cur.id) {
           throw new BadRequestException(
-            `Insufficient float balance in "${floatAcc.name}". Available: ${toNumber(currentBal)}.`,
+            `Currency mismatch: advance currency (${cur.code}) does not match float account "${floatAcc.name}".`,
           );
         }
-        await tx.floatAccount.update({
-          where: { id: floatAcc.id },
-          data: { currentBalance: toPrismaDecimal(currentBal.minus(toDecimal(dto.amountPaid))) },
+        const deductAmt = toPrismaDecimal(dto.amountPaid);
+        const debited = await tx.floatAccount.updateMany({
+          where: { id: floatAcc.id, currentBalance: { gte: deductAmt } },
+          data: { currentBalance: { decrement: deductAmt }, updateUserId: user.id },
         });
+        if (debited.count === 0) {
+          throw new BadRequestException(
+            `Insufficient float balance in "${floatAcc.name}". Available: ${toNumber(floatAcc.currentBalance)}.`,
+          );
+        }
+        const updatedFloat = await tx.floatAccount.findUnique({ where: { id: floatAcc.id } });
+        if (this.changeLogService && updatedFloat) {
+          await this.changeLogService.logUpdate({
+            tableName: 'FloatAccount',
+            recordId: floatAcc.id,
+            recordCode: floatAcc.code,
+            oldValues: floatAcc,
+            newValues: updatedFloat,
+            description: `Deducted ${cur.code} ${dto.amountPaid} for Petty Cash Advance`,
+            actor: user,
+            tx,
+          });
+        }
       }
 
       // Update Department Budget consumed/available atomically
@@ -544,13 +591,25 @@ export class PettyCashService {
         if (budget) {
           const nextConsumed = toDecimal(budget.consumedAmount).plus(baseAmount);
           const nextAvailable = Decimal.max(0, toDecimal(budget.monthlyLimit).minus(nextConsumed));
-          await tx.budget.update({
+          const updatedBudget = await tx.budget.update({
             where: { id: budget.id },
             data: {
               consumedAmount: toPrismaDecimal(nextConsumed),
               availableAmount: toPrismaDecimal(nextAvailable),
+              updateUserId: user.id,
             },
           });
+          if (this.changeLogService) {
+            await this.changeLogService.logUpdate({
+              tableName: 'Budget',
+              recordId: budget.id,
+              recordCode: `${budget.fiscalYear}-DEPT-${budget.departmentId}`,
+              oldValues: budget,
+              newValues: updatedBudget,
+              actor: user,
+              tx,
+            });
+          }
         }
       }
 
@@ -699,11 +758,12 @@ export class PettyCashService {
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.PettyCashBillSubmissionWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeBranch: true, includeOutlet: false },
+    );
     if (query?.submissionType && query.submissionType !== 'all') {
       where.submissionType = query.submissionType;
     }
@@ -987,13 +1047,23 @@ export class PettyCashService {
     const bill = await this.prisma.pettyCashBillSubmission.findUnique({ where: { id } });
     if (!bill) throw new NotFoundException(`Bill Submission #${id} not found.`);
     await assertEntityScope(this.prisma, user, bill);
+    if (bill.createdById === user.id) {
+      throw new ForbiddenException(
+        'Maker-Checker control violation: the submitter cannot verify their own bill submission.',
+      );
+    }
+    if (bill.status !== 'Pending Verification') {
+      throw new BadRequestException(
+        `Bill Submission ${bill.docNo} cannot be verified in status "${bill.status}".`,
+      );
+    }
 
     const decision = body?.decision || 'approve';
     const nextStatus = decision === 'approve' ? 'Verified & Settled' : 'Rejected';
 
     await this.prisma.$transaction(async (tx) => {
-      const nextBill = await tx.pettyCashBillSubmission.update({
-        where: { id },
+      const transitioned = await tx.pettyCashBillSubmission.updateMany({
+        where: { id, status: 'Pending Verification' },
         data: {
           status: nextStatus,
           approverAction: decision === 'approve' ? 'Approved' : 'Rejected',
@@ -1003,8 +1073,14 @@ export class PettyCashService {
           updateUserId: user.id,
         },
       });
+      if (transitioned.count === 0) {
+        throw new BadRequestException(
+          `Bill Submission ${bill.docNo} has already been verified or changed status concurrently.`,
+        );
+      }
+      const nextBill = await tx.pettyCashBillSubmission.findUnique({ where: { id } });
 
-      if (this.changeLogService) {
+      if (this.changeLogService && nextBill) {
         await this.changeLogService.logAction({
           action: decision === 'approve' ? 'APPROVE' : 'REJECT',
           tableName: 'PettyCashBillSubmission',
@@ -1021,39 +1097,69 @@ export class PettyCashService {
       if (decision === 'approve' && bill.advanceId) {
         const adv = await tx.pettyCashAdvance.findUnique({ where: { id: bill.advanceId } });
         if (adv) {
-          const nextSettled = toDecimal(adv.settledAmount).plus(toDecimal(bill.totalBillAmount));
-          const nextDue = Decimal.max(
+          // Convert base-currency bill total to advance's native currency using advance's exRate
+          const advRate = toDecimal(adv.exRate).gt(0) ? toDecimal(adv.exRate) : new Decimal(1);
+          const billInAdvNative = roundMoney(toDecimal(bill.totalBillAmount).div(advRate));
+          const nextSettledNative = toDecimal(adv.settledAmount).plus(billInAdvNative);
+          const nextDueNative = Decimal.max(
             0,
-            toDecimal(adv.amountPaid).minus(nextSettled).minus(toDecimal(adv.refundAmount)),
+            toDecimal(adv.amountPaid).minus(nextSettledNative).minus(toDecimal(adv.refundAmount)),
           );
-          const fullyClosed = nextDue.lt(0.01);
-          await tx.pettyCashAdvance.update({
+          const fullyClosed = nextDueNative.lt(0.01);
+          const updatedAdv = await tx.pettyCashAdvance.update({
             where: { id: adv.id },
             data: {
-              settledAmount: toPrismaDecimal(nextSettled),
-              balanceDue: toPrismaDecimal(nextDue),
+              settledAmount: toPrismaDecimal(nextSettledNative),
+              balanceDue: toPrismaDecimal(nextDueNative),
               settledStatus: fullyClosed ? 'Settled via Bills' : 'Partially Settled (Return Due)',
               status: fullyClosed ? 'Settled' : 'Paid',
+              updateUserId: user.id,
             },
           });
+          if (this.changeLogService) {
+            await this.changeLogService.logUpdate({
+              tableName: 'PettyCashAdvance',
+              recordId: adv.id,
+              recordCode: adv.docNo,
+              oldValues: adv,
+              newValues: updatedAdv,
+              actor: user,
+              tx,
+            });
+          }
 
-          await tx.pettyCashIOU.updateMany({
-            where: { advanceId: adv.id },
-            data: {
-              settledAmount: toPrismaDecimal(nextSettled),
-              pendingAmount: toPrismaDecimal(nextDue),
-              settledVfApproved: fullyClosed ? 'Verified' : 'Pending Return',
-              status: fullyClosed ? 'Fully Closed' : 'Active Advance',
-            },
-          });
+          // Keep PettyCashIOU strictly in base currency
+          const existingIou = await tx.pettyCashIOU.findFirst({ where: { advanceId: adv.id } });
+          if (existingIou) {
+            const nextIouSettledBase = toDecimal(existingIou.settledAmount).plus(
+              toDecimal(bill.totalBillAmount),
+            );
+            const nextIouPendingBase = Decimal.max(
+              0,
+              toDecimal(existingIou.advAmount)
+                .minus(nextIouSettledBase)
+                .minus(toDecimal(existingIou.returnAmount)),
+            );
+            await tx.pettyCashIOU.update({
+              where: { id: existingIou.id },
+              data: {
+                settledAmount: toPrismaDecimal(nextIouSettledBase),
+                pendingAmount: toPrismaDecimal(nextIouPendingBase),
+                settledVfApproved: fullyClosed ? 'Verified' : 'Pending Return',
+                status: fullyClosed ? 'Fully Closed' : 'Active Advance',
+                updateUserId: user.id,
+              },
+            });
+          }
 
           if (adv.requestId) {
             await tx.pettyCashRequest.update({
               where: { id: adv.requestId },
               data: {
-                settledAmount: toPrismaDecimal(nextSettled),
+                settledAmount: toPrismaDecimal(nextSettledNative),
                 settledDate: new Date(),
                 status: fullyClosed ? 'Settled' : 'Paid',
+                updateUserId: user.id,
               },
             });
           }
@@ -1082,6 +1188,7 @@ export class PettyCashService {
   async notifyCashierForBill(user: AuthenticatedUser, id: number) {
     const bill = await this.prisma.pettyCashBillSubmission.findUnique({ where: { id } });
     if (!bill) throw new NotFoundException(`Bill Submission #${id} not found.`);
+    await assertEntityScope(this.prisma, user, bill);
     await this.prisma.$transaction(async (tx) => {
       const next = await tx.pettyCashBillSubmission.update({
         where: { id },
@@ -1116,11 +1223,12 @@ export class PettyCashService {
   async listReturns(user: AuthenticatedUser, query?: { companyId?: number; search?: string }) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.PettyCashReturnWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
-    if (query?.companyId) where.companyId = Number(query.companyId);
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeBranch: true, includeOutlet: false },
+    );
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1175,6 +1283,24 @@ export class PettyCashService {
         : dto.pettyCashVoucherNo
           ? await tx.pettyCashAdvance.findUnique({ where: { docNo: dto.pettyCashVoucherNo } })
           : null;
+
+      if (adv) {
+        if (adv.status === 'Settled' || toDecimal(adv.balanceDue).lte(0)) {
+          throw new BadRequestException(
+            `Advance ${adv.docNo} is already fully settled with zero balance due.`,
+          );
+        }
+        if (adv.currencyId !== cur.id) {
+          throw new BadRequestException(
+            `Return currency (${cur.code}) must match advance currency.`,
+          );
+        }
+        if (toDecimal(dto.returnAmount).gt(toDecimal(adv.balanceDue))) {
+          throw new BadRequestException(
+            `Return amount (${dto.returnAmount}) exceeds remaining advance balance due (${toNumber(adv.balanceDue)}).`,
+          );
+        }
+      }
 
       const docNo =
         dto.docNo && !(await tx.pettyCashReturn.findUnique({ where: { docNo: dto.docNo } }))
@@ -1235,10 +1361,33 @@ export class PettyCashService {
 
       // Credit float account & close advance/IOU atomically
       if (adv?.floatAccountId) {
-        await tx.floatAccount.update({
-          where: { id: adv.floatAccountId },
-          data: { currentBalance: { increment: toPrismaDecimal(dto.returnAmount) } },
-        });
+        const floatBefore = await tx.floatAccount.findUnique({ where: { id: adv.floatAccountId } });
+        if (floatBefore) {
+          if (floatBefore.currencyId !== cur.id) {
+            throw new BadRequestException(
+              `Return currency (${cur.code}) does not match float account "${floatBefore.name}".`,
+            );
+          }
+          const floatAfter = await tx.floatAccount.update({
+            where: { id: adv.floatAccountId },
+            data: {
+              currentBalance: { increment: toPrismaDecimal(dto.returnAmount) },
+              updateUserId: user.id,
+            },
+          });
+          if (this.changeLogService) {
+            await this.changeLogService.logUpdate({
+              tableName: 'FloatAccount',
+              recordId: floatBefore.id,
+              recordCode: floatBefore.code,
+              oldValues: floatBefore,
+              newValues: floatAfter,
+              description: `Credited ${cur.code} ${dto.returnAmount} from Advance Return ${ret.docNo}`,
+              actor: user,
+              tx,
+            });
+          }
+        }
       }
 
       if (adv) {
@@ -1248,7 +1397,7 @@ export class PettyCashService {
           toDecimal(adv.amountPaid).minus(toDecimal(adv.settledAmount)).minus(nextRefund),
         );
         const closed = nextDue.lt(0.01);
-        await tx.pettyCashAdvance.update({
+        const updatedAdv = await tx.pettyCashAdvance.update({
           where: { id: adv.id },
           data: {
             refundAmount: toPrismaDecimal(nextRefund),
@@ -1256,17 +1405,40 @@ export class PettyCashService {
             balanceDue: toPrismaDecimal(nextDue),
             settledStatus: closed ? 'Settled & Refunded' : 'Partially Refunded',
             status: closed ? 'Settled' : adv.status,
+            updateUserId: user.id,
           },
         });
-        await tx.pettyCashIOU.updateMany({
-          where: { advanceId: adv.id },
-          data: {
-            returnAmount: toPrismaDecimal(nextRefund),
-            pendingAmount: toPrismaDecimal(nextDue),
-            settledVfApproved: closed ? 'Verified' : 'Partially Refunded',
-            status: closed ? 'Fully Closed' : 'Active Advance',
-          },
-        });
+        if (this.changeLogService) {
+          await this.changeLogService.logUpdate({
+            tableName: 'PettyCashAdvance',
+            recordId: adv.id,
+            recordCode: adv.docNo,
+            oldValues: adv,
+            newValues: updatedAdv,
+            actor: user,
+            tx,
+          });
+        }
+        const existingIou = await tx.pettyCashIOU.findFirst({ where: { advanceId: adv.id } });
+        if (existingIou) {
+          const nextIouRetBase = toDecimal(existingIou.returnAmount).plus(baseAmount);
+          const nextIouPendingBase = Decimal.max(
+            0,
+            toDecimal(existingIou.advAmount)
+              .minus(toDecimal(existingIou.settledAmount))
+              .minus(nextIouRetBase),
+          );
+          await tx.pettyCashIOU.update({
+            where: { id: existingIou.id },
+            data: {
+              returnAmount: toPrismaDecimal(nextIouRetBase),
+              pendingAmount: toPrismaDecimal(nextIouPendingBase),
+              settledVfApproved: closed ? 'Verified' : 'Partially Refunded',
+              status: closed ? 'Fully Closed' : 'Active Advance',
+              updateUserId: user.id,
+            },
+          });
+        }
         if (adv.requestId) {
           await tx.pettyCashRequest.update({
             where: { id: adv.requestId },
@@ -1274,6 +1446,7 @@ export class PettyCashService {
               refundAmount: toPrismaDecimal(nextRefund),
               refundDate: parseDateOnly(dto.docDate),
               ...(closed ? { status: 'Settled' } : {}),
+              updateUserId: user.id,
             },
           });
         }
@@ -1373,6 +1546,8 @@ export class PettyCashService {
         remark: v.remark || '',
         amount: toPrismaDecimal(v.amount),
         runningTotal: toPrismaDecimal(running),
+        createUserId: user.id,
+        updateUserId: user.id,
       };
     });
 
@@ -1452,6 +1627,21 @@ export class PettyCashService {
     });
     if (!existing) throw new NotFoundException(`Float Reimbursement #${reimbursementId} not found.`);
     await assertEntityScope(this.prisma, user, existing);
+    if (existing.status !== 'Draft') {
+      throw new BadRequestException(
+        `Cannot add vouchers to Float Reimbursement ${existing.docNo} in status "${existing.status}".`,
+      );
+    }
+    if (dto.billSubmissionId) {
+      const duplicateClaim = await this.prisma.floatReimbursementVoucher.findFirst({
+        where: { billSubmissionId: dto.billSubmissionId },
+      });
+      if (duplicateClaim) {
+        throw new BadRequestException(
+          `Bill Submission #${dto.billSubmissionId} has already been included in a Float Reimbursement claim.`,
+        );
+      }
+    }
 
     const prevTotal = existing.vouchers.reduce(
       (sum, v) => sum.plus(toDecimal(v.amount)),
@@ -1501,6 +1691,11 @@ export class PettyCashService {
     const existing = await this.prisma.floatReimbursement.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException(`Float Reimbursement #${id} not found.`);
     await assertEntityScope(this.prisma, user, existing);
+    if (existing.status !== 'Draft') {
+      throw new BadRequestException(
+        `Float Reimbursement ${existing.docNo} cannot be submitted in status "${existing.status}".`,
+      );
+    }
 
     await this.prisma.$transaction(async (tx) => {
       const next = await tx.floatReimbursement.update({
@@ -1542,9 +1737,22 @@ export class PettyCashService {
   // STEP 6: DYNAMIC SERVER-COMPUTED IOU AGING MATRIX
   // ============================================================================
 
-  async getIouAging() {
+  async getIouAging(user?: AuthenticatedUser) {
+    let where: Prisma.PettyCashIOUWhereInput | undefined = undefined;
+    if (user) {
+      const scope = await getEffectiveScope(this.prisma, user);
+      if (!scope.unrestricted) {
+        where = {
+          advance: {
+            companyId: { in: scope.companyIds },
+            branchId: { in: scope.branchIds },
+          },
+        };
+      }
+    }
+
     const [ious, baseInfo] = await Promise.all([
-      this.prisma.pettyCashIOU.findMany({ orderBy: { docDate: 'asc' } }),
+      this.prisma.pettyCashIOU.findMany({ where, orderBy: { docDate: 'asc' } }),
       this.fxResolver.getSystemBaseCurrency(),
     ]);
 

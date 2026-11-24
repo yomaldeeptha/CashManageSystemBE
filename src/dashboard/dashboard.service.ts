@@ -30,6 +30,15 @@ export class DashboardService {
         ? [Number(query.outletId)].filter((id) => scope.unrestricted || scope.outletIds.includes(id))
         : scope.outletIds;
 
+    const dateFilter = query?.date
+      ? (() => {
+          const parsed = new Date(`${query.date}T00:00:00.000Z`);
+          if (Number.isNaN(parsed.getTime())) return undefined;
+          const end = new Date(parsed.getTime() + 24 * 60 * 60 * 1000 - 1);
+          return { gte: parsed, lte: end };
+        })()
+      : undefined;
+
     const [
       outlets,
       deposits,
@@ -51,20 +60,47 @@ export class DashboardService {
         orderBy: { id: 'asc' },
       }),
       this.prisma.cashDeposit.findMany({
-        where: { companyId: { in: companyIds }, outletId: { in: outletIds } },
+        where: {
+          companyId: { in: companyIds },
+          outletId: { in: outletIds },
+          ...(dateFilter ? { collectionDate: dateFilter } : {}),
+        },
         include: { currencies: { include: { currency: true } } },
+        orderBy: [{ collectionDate: 'desc' }, { id: 'desc' }],
       }),
       this.prisma.pettyCashRequest.findMany({
-        where: { companyId: { in: companyIds }, branchId: { in: scope.branchIds } },
+        where: {
+          companyId: { in: companyIds },
+          branchId: { in: scope.branchIds },
+          ...(dateFilter ? { requestDate: dateFilter } : {}),
+        },
+        orderBy: [{ requestDate: 'desc' }, { id: 'desc' }],
       }),
       this.prisma.salesReconciliation.findMany({
-        where: { companyId: { in: companyIds }, outletId: { in: outletIds } },
+        where: {
+          companyId: { in: companyIds },
+          outletId: { in: outletIds },
+          ...(dateFilter ? { docDate: dateFilter } : {}),
+        },
+        orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
       }),
-      this.prisma.pettyCashIOU.findMany(),
+      this.prisma.pettyCashIOU.findMany({
+        where: {
+          advance: {
+            companyId: { in: companyIds },
+            branchId: { in: scope.branchIds },
+          },
+        },
+      }),
       this.prisma.approvalInstance.findMany({
         where: {
           status: { in: ['Pending', 'In Review'] },
           companyId: { in: companyIds },
+          ...(!scope.unrestricted
+            ? { OR: [{ outletId: null }, { outletId: { in: outletIds } }] }
+            : query?.outletId && query.outletId !== 'all'
+              ? { OR: [{ outletId: null }, { outletId: { in: outletIds } }] }
+              : {}),
         },
       }),
       this.prisma.varianceIncident.findMany({
@@ -88,8 +124,10 @@ export class DashboardService {
     const completedOutlets = outlets.filter((o) => closedOutletIds.has(o.id)).length;
     const readinessPct = totalOutlets > 0 ? Math.round((completedOutlets / totalOutlets) * 100) : 0;
 
-    // 2. Cash in Hand (unbanked deposits not yet Posted/Rejected)
-    const activeDeposits = deposits.filter((d) => !['Posted', 'Rejected'].includes(d.status));
+    // 2. Cash in Hand (active unbanked deposits — exclude Posted, Rejected, Cancelled, Reversed)
+    const activeDeposits = deposits.filter(
+      (d) => !['Posted', 'Rejected', 'Cancelled', 'Reversed'].includes(d.status),
+    );
     const cashInHandBase = activeDeposits.reduce(
       (sum, d) => sum.plus(toDecimal(d.totalBaseAmount)),
       new Decimal(0),

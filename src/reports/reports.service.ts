@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import Decimal from 'decimal.js';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
@@ -155,10 +156,13 @@ export class ReportsService {
 
     const rows = deposits.map((d) => {
       const amt = toDecimal(d.totalBaseAmount);
-      totalCollections = totalCollections.plus(amt);
-      if (['Approved', 'Posted'].includes(d.status)) bankedTotal = bankedTotal.plus(amt);
-      else if (d.status === 'Rejected') discrepanciesTotal = discrepanciesTotal.plus(amt);
-      else inVaultTotal = inVaultTotal.plus(amt);
+      const isVoid = ['Cancelled', 'Reversed'].includes(d.status);
+      if (!isVoid) {
+        totalCollections = totalCollections.plus(amt);
+        if (['Approved', 'Posted'].includes(d.status)) bankedTotal = bankedTotal.plus(amt);
+        else if (d.status === 'Rejected') discrepanciesTotal = discrepanciesTotal.plus(amt);
+        else inVaultTotal = inVaultTotal.plus(amt);
+      }
 
       const curMap: Record<string, number> = {};
       for (const c of d.currencies) {
@@ -321,12 +325,17 @@ export class ReportsService {
   }
 
   // ---- RPT-003: Petty Cash Float & IOU Aging Analysis ----
-  async getPettyIouReport(_user: AuthenticatedUser, query?: ReportFilterQuery) {
+  async getPettyIouReport(user: AuthenticatedUser, query?: ReportFilterQuery) {
+    const { scope, companyIds } = await this.resolveScopedEntityIds(user, query);
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
     const dateFilter = this.resolveDateBounds(query);
 
     const ious = await this.prisma.pettyCashIOU.findMany({
       where: {
+        advance: {
+          companyId: { in: companyIds },
+          branchId: { in: scope.branchIds },
+        },
         ...(dateFilter ? { docDate: dateFilter } : {}),
         ...(query?.search
           ? {
@@ -509,7 +518,7 @@ export class ReportsService {
         where: {
           companyId: { in: companyIds },
           outletId: { in: outletIds },
-          status: { not: 'Rejected' },
+          status: { notIn: ['Rejected', 'Cancelled', 'Reversed', 'Posted'] },
         },
         include: { currencies: true },
       }),
@@ -518,12 +527,17 @@ export class ReportsService {
           cashDeposit: {
             companyId: { in: companyIds },
             outletId: { in: outletIds },
-            status: { not: 'Rejected' },
+            status: { notIn: ['Rejected', 'Cancelled', 'Reversed', 'Posted'] },
           },
         },
         include: { currency: true },
       }),
-      this.prisma.floatAccount.findMany({ where: { isActive: true } }),
+      this.prisma.floatAccount.findMany({
+        where: {
+          isActive: true,
+          OR: [{ outletId: null }, { outletId: { in: outletIds } }],
+        },
+      }),
     ]);
 
     const holdingMap = new Map<
@@ -647,14 +661,20 @@ export class ReportsService {
 
   // ---- RPT-006: Maker-Checker Audit SLA & Governance Compliance ----
   async getAuditGovernanceReport(user: AuthenticatedUser, query?: ReportFilterQuery) {
-    const { companyIds } = await this.resolveScopedEntityIds(user, query);
+    const { companyIds, outletIds } = await this.resolveScopedEntityIds(user, query);
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
+
+    const instanceWhere: Prisma.ApprovalInstanceWhereInput = {
+      companyId: { in: companyIds },
+      OR: [{ outletId: null }, { outletId: { in: outletIds } }],
+    };
 
     const [instances, decisions, recons] = await Promise.all([
       this.prisma.approvalInstance.findMany({
-        where: { companyId: { in: companyIds } },
+        where: instanceWhere,
       }),
       this.prisma.approvalDecision.findMany({
+        where: { instance: instanceWhere },
         include: {
           decidedBy: { include: { role: true } },
           instance: true,
@@ -662,7 +682,7 @@ export class ReportsService {
         orderBy: { decidedAt: 'desc' },
       }),
       this.prisma.salesReconciliation.findMany({
-        where: { companyId: { in: companyIds } },
+        where: { companyId: { in: companyIds }, outletId: { in: outletIds } },
       }),
     ]);
 
@@ -725,7 +745,12 @@ export class ReportsService {
 
     let reviewers = Array.from(reviewerMap.values()).map((r) => {
       const avgTurnaround = Number((r.totalHours / Math.max(1, r.slipsAudited)).toFixed(1));
-      const score = avgTurnaround <= 4 ? 98 : avgTurnaround <= 8 ? 92 : 85;
+      const withinSlaCount = decisions.filter(
+        (dec) =>
+          dec.decidedById === r.userId &&
+          (dec.decidedAt.getTime() - dec.instance.createdAt.getTime()) / 3600000 <= 8,
+      ).length;
+      const score = Math.round((withinSlaCount / Math.max(1, r.slipsAudited)) * 100);
       return {
         id: r.userId,
         name: r.name,
@@ -735,7 +760,7 @@ export class ReportsService {
         shortagesFlagged: r.flagged,
         avgTurnaroundHours: `${avgTurnaround}h`,
         complianceScore: `${score}%`,
-        rating: score >= 95 ? 'Excellent' : 'Good',
+        rating: score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : 'Needs Review',
       };
     });
 

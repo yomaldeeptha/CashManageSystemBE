@@ -39,7 +39,7 @@ export class CreateUserDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  @MinLength(6)
+  @MinLength(8)
   password?: string;
 
   @ApiPropertyOptional()
@@ -255,7 +255,7 @@ export class UpdateProfileDto {
 export class ResetPasswordDto {
   @ApiProperty()
   @IsString()
-  @MinLength(6)
+  @MinLength(8)
   newPassword!: string;
 
   @ApiPropertyOptional({ default: true })

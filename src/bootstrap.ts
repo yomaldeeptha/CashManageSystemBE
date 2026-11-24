@@ -27,12 +27,18 @@ export async function createNestApp(): Promise<INestApplication> {
   );
   app.use(compression());
 
+  const isProduction = configService.get<string>('NODE_ENV') === 'production';
+
   app.enableCors({
     origin: (
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void,
     ) => {
-      if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      if (
+        !origin ||
+        (!isProduction && allowedOrigins.includes('*')) ||
+        allowedOrigins.includes(origin)
+      ) {
         callback(null, true);
       } else {
         callback(new Error(`Origin ${origin} is not allowed by CORS policy.`));
@@ -59,29 +65,31 @@ export async function createNestApp(): Promise<INestApplication> {
   app.useGlobalFilters(new AllExceptionsFilter());
   app.useGlobalInterceptors(new ResponseInterceptor());
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('BNF Connect — Cash Management System API')
-    .setDescription(
-      'Enterprise REST API for Brew & Feast Cash Management System (Process 01 Cash Collection & Treasury, Process 02 Petty Cash & IOU Aging, Process 03 Sales Day-End Reconciliation, Process 04 Multi-Stage Approvals, 25 Master Data Catalogs, RBAC & Financial Reports).',
-    )
-    .setVersion('1.0.0')
-    .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        description: 'Enter JWT access token obtained from POST /api/v1/auth/login',
-      },
-      'JWT-auth',
-    )
-    .build();
+  if (!isProduction || configService.get<string>('ENABLE_SWAGGER') === 'true') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('BNF Connect — Cash Management System API')
+      .setDescription(
+        'Enterprise REST API for Brew & Feast Cash Management System (Process 01 Cash Collection & Treasury, Process 02 Petty Cash & IOU Aging, Process 03 Sales Day-End Reconciliation, Process 04 Multi-Stage Approvals, 25 Master Data Catalogs, RBAC & Financial Reports).',
+      )
+      .setVersion('1.0.0')
+      .addBearerAuth(
+        {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          description: 'Enter JWT access token obtained from POST /api/v1/auth/login',
+        },
+        'JWT-auth',
+      )
+      .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, document, {
-    swaggerOptions: {
-      persistAuthorization: true,
-    },
-  });
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('api/docs', app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    });
+  }
 
   return app;
 }

@@ -145,9 +145,123 @@ export async function assertEntityScope(
     }
   }
 
+  let finalBranchId = branch ? branch.id : null;
+  if (finalBranchId === null) {
+    const fallbackBranch = await prisma.branch.findFirst({
+      where: {
+        companyId: company.id,
+        ...(!scope.unrestricted ? { id: { in: scope.branchIds } } : {}),
+      },
+      orderBy: { id: 'asc' },
+    });
+    if (!fallbackBranch) {
+      throw new BadRequestException(
+        `No authorized operating branch is configured for Company "${company.name}".`,
+      );
+    }
+    finalBranchId = fallbackBranch.id;
+  }
+
   return {
     companyId: company.id,
-    branchId: branch ? branch.id : (await prisma.branch.findFirst({ where: { companyId: company.id } }))?.id ?? 1,
+    branchId: finalBranchId,
     outletId: outlet ? outlet.id : null,
   };
+}
+
+/**
+ * Safely applies entity-scope filtering AND optional query filters without allowing
+ * a scoped user to escape their authorized company/branch/outlet boundaries via query params.
+ */
+export function applyEntityScopeToWhere(
+  where: Record<string, unknown>,
+  scope: {
+    unrestricted: boolean;
+    companyIds: number[];
+    branchIds: number[];
+    outletIds: number[];
+  },
+  query?: {
+    companyId?: number | string | null;
+    branchId?: number | string | null;
+    outletId?: number | string | null;
+  },
+  options?: {
+    includeBranch?: boolean;
+    includeOutlet?: boolean;
+    allowNullOutlet?: boolean;
+  },
+): void {
+  const includeBranch = options?.includeBranch ?? false;
+  const includeOutlet = options?.includeOutlet ?? true;
+  const allowNullOutlet = options?.allowNullOutlet ?? false;
+
+  const requestedCompanyId =
+    query?.companyId !== undefined &&
+    query?.companyId !== null &&
+    query?.companyId !== '' &&
+    query?.companyId !== 'all'
+      ? Number(query.companyId)
+      : null;
+
+  const requestedBranchId =
+    query?.branchId !== undefined &&
+    query?.branchId !== null &&
+    query?.branchId !== '' &&
+    query?.branchId !== 'all'
+      ? Number(query.branchId)
+      : null;
+
+  const requestedOutletId =
+    query?.outletId !== undefined &&
+    query?.outletId !== null &&
+    query?.outletId !== '' &&
+    query?.outletId !== 'all'
+      ? Number(query.outletId)
+      : null;
+
+  if (requestedCompanyId !== null && !Number.isNaN(requestedCompanyId)) {
+    if (!scope.unrestricted && !scope.companyIds.includes(requestedCompanyId)) {
+      throw new ForbiddenException(
+        `You are not authorized to query Company ID ${requestedCompanyId}.`,
+      );
+    }
+    where.companyId = requestedCompanyId;
+  } else if (!scope.unrestricted) {
+    where.companyId = { in: scope.companyIds };
+  }
+
+  if (includeBranch) {
+    if (requestedBranchId !== null && !Number.isNaN(requestedBranchId)) {
+      if (!scope.unrestricted && !scope.branchIds.includes(requestedBranchId)) {
+        throw new ForbiddenException(
+          `You are not authorized to query Branch ID ${requestedBranchId}.`,
+        );
+      }
+      where.branchId = requestedBranchId;
+    } else if (!scope.unrestricted) {
+      where.branchId = { in: scope.branchIds };
+    }
+  }
+
+  if (includeOutlet) {
+    if (requestedOutletId !== null && !Number.isNaN(requestedOutletId)) {
+      if (!scope.unrestricted && !scope.outletIds.includes(requestedOutletId)) {
+        throw new ForbiddenException(
+          `You are not authorized to query Outlet ID ${requestedOutletId}.`,
+        );
+      }
+      where.outletId = requestedOutletId;
+    } else if (!scope.unrestricted) {
+      if (allowNullOutlet) {
+        const existingAnd = Array.isArray(where.AND) ? (where.AND as unknown[]) : [];
+        where.AND = [
+          ...existingAnd,
+          { OR: [{ outletId: null }, { outletId: { in: scope.outletIds } }] },
+        ];
+      } else {
+        where.outletId = { in: scope.outletIds };
+      }
+    }
+  }
 }

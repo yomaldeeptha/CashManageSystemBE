@@ -14,13 +14,39 @@ import { ChangeLogService } from './audit.service';
 import { AuditLogQueryDto } from './audit.types';
 
 const RESTRICTED_ADMIN_TABLES = new Set([
-  'User',
-  'Role',
-  'RolePermission',
-  'UserGroup',
-  'UserScreenAuthorization',
-  'BusinessConfig',
+  'user',
+  'role',
+  'rolepermission',
+  'usergroup',
+  'userscreenauthorization',
+  'businessconfig',
+  'screen',
+  'menunode',
 ]);
+
+const TABLE_MODULE_PERMISSION_MAP: Record<string, string> = {
+  cashdeposit: 'cashDeposit',
+  cashierpayment: 'cashDeposit',
+  cashiersettlement: 'cashDeposit',
+  cashcollectionreceipt: 'cashDeposit',
+  maincashierpayment: 'cashDeposit',
+  maincashiersettlement: 'cashDeposit',
+  outletbankdeposit: 'cashDeposit',
+  bankreconciliation: 'cashDeposit',
+  pettycashrequest: 'pettyCash',
+  pettycashadvance: 'pettyCash',
+  pettycashbillsubmission: 'pettyCash',
+  pettycashreturn: 'pettyCash',
+  floatreimbursement: 'pettyCash',
+  pettycashiou: 'pettyCash',
+  salesreconciliation: 'salesRecon',
+  varianceincident: 'salesRecon',
+  approvalinstance: 'approvals',
+  approvalstage: 'approvals',
+  approvaltemplate: 'approvals',
+  notificationtemplate: 'notifications',
+  printtemplate: 'printFormats',
+};
 
 /**
  * Read-Only Audit & Change Logs REST Controller.
@@ -55,16 +81,23 @@ export class ChangeLogsController {
     @Param('tableName') tableName: string,
     @Param('recordId') recordId: string,
   ) {
+    const normalizedTable = tableName.trim().toLowerCase();
     const isAdminOrAuditor =
       user.roleCode === 'ADM' || Boolean(user.permissions?.auditExport?.read);
-    if (
-      RESTRICTED_ADMIN_TABLES.has(tableName) &&
-      !isAdminOrAuditor &&
-      !user.permissions?.userManagement?.read
-    ) {
-      throw new ForbiddenException(
-        `You are not authorized to inspect change history for "${tableName}".`,
-      );
+
+    if (RESTRICTED_ADMIN_TABLES.has(normalizedTable)) {
+      if (!isAdminOrAuditor && !user.permissions?.userManagement?.read) {
+        throw new ForbiddenException(
+          `You are not authorized to inspect change history for "${tableName}".`,
+        );
+      }
+    } else if (!isAdminOrAuditor) {
+      const requiredModule = TABLE_MODULE_PERMISSION_MAP[normalizedTable] || 'masterData';
+      if (!user.permissions?.[requiredModule]?.read) {
+        throw new ForbiddenException(
+          `You are not authorized to inspect change history for "${tableName}".`,
+        );
+      }
     }
     return this.changeLogService.getRecordHistory(tableName, recordId);
   }

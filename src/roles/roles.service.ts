@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, Optional } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { ChangeLogService } from '../common/audit/audit.service';
@@ -125,15 +131,33 @@ export class RolesService {
 
   async update(actor: AuthenticatedUser, id: number, dto: SaveRoleDto) {
     await this.prisma.$transaction(async (tx) => {
-      const existing = await tx.role.findUnique({ where: { id } });
+      const existing = await tx.role.findUnique({
+        where: { id },
+        include: { _count: { select: { users: { where: { isActive: true } } } } },
+      });
       if (!existing) throw new NotFoundException(`Role #${id} not found.`);
+      const nextCode = dto.code.trim().toUpperCase();
+      const nextActive = dto.status === undefined ? existing.isActive : dto.status === 1;
+      if (existing.code === 'ADM') {
+        if (nextCode !== 'ADM') {
+          throw new ForbiddenException('The core System Administrator (ADM) role code cannot be changed.');
+        }
+        if (!nextActive) {
+          throw new ForbiddenException('The core System Administrator (ADM) role cannot be deactivated.');
+        }
+      }
+      if (!nextActive && existing._count.users > 0) {
+        throw new BadRequestException(
+          `Cannot deactivate role "${existing.name}" while ${existing._count.users} active user(s) are assigned to it.`,
+        );
+      }
       const updated = await tx.role.update({
         where: { id },
         data: {
-          code: dto.code.trim().toUpperCase(),
+          code: nextCode,
           name: dto.name.trim(),
           description: dto.description || '',
-          isActive: dto.status === undefined ? existing.isActive : dto.status === 1,
+          isActive: nextActive,
           updateUserId: actor.id,
         },
       });
@@ -186,8 +210,12 @@ export class RolesService {
         };
       }
 
+      const allowedModules = new Set(DEFAULT_MODULES);
       const newPermsMap: Record<string, unknown> = { ...oldPermsMap };
       for (const [moduleKey, perms] of Object.entries(dto.permissions)) {
+        if (!allowedModules.has(moduleKey)) {
+          throw new BadRequestException(`Unknown permission module key "${moduleKey}".`);
+        }
         const nextVal = {
           read: Boolean(perms.read),
           create: Boolean(perms.create),
