@@ -644,7 +644,7 @@ async function main() {
       companies: [comp1.id, comp2.id], branches: [br1.id, br2.id, br3.id, br4.id], outlets: [out1.id, out2.id, out3.id, out4.id, out5.id], departments: [depts[4].id, depts[5].id],
     },
     {
-      username: 'superadmin', fullName: 'Pramuditha Bandara', email: 'admin@brewfeast.mv', pass: 'bnf@admin2026',
+      username: 'superadmin', fullName: 'Pramuditha Bandara', email: 'admin@brewfeast.mv', pass: 'Aes@1234',
       empNo: 'ADM-001', designation: 'System Administrator', roleCode: 'ADM', groupCode: 'UG-ADM-06', employeeId: emps[10].id,
       companies: [], branches: [], outlets: [], departments: depts.map((dp) => dp.id), // Empty company/branch/outlet -> unrestricted root admin
     },
