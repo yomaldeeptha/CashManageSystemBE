@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { PrismaService } from '../database/prisma.service';
@@ -65,10 +66,15 @@ export class AttachmentsService {
     private readonly auditService: AuditService,
     @Optional() private readonly changeLogService?: ChangeLogService,
   ) {
-    this.uploadRoot = path.resolve(
-      process.cwd(),
-      this.configService.get<string>('UPLOAD_DIR') || './uploads',
-    );
+    const configuredUploadDir = this.configService.get<string>('UPLOAD_DIR');
+    if (configuredUploadDir) {
+      this.uploadRoot = path.resolve(process.cwd(), configuredUploadDir);
+    } else if (process.env.VERCEL) {
+      // Vercel serverless filesystem is read-only outside /tmp
+      this.uploadRoot = path.join(os.tmpdir(), 'bnf-cms-uploads');
+    } else {
+      this.uploadRoot = path.resolve(process.cwd(), './uploads');
+    }
     this.maxBytes =
       this.configService.get<number>('MAX_UPLOAD_SIZE_BYTES') || 10 * 1024 * 1024;
   }
@@ -109,8 +115,8 @@ export class AttachmentsService {
     const moduleKey = entityType.startsWith('petty_cash') || entityType === 'float_reimbursement'
       ? 'pettyCash'
       : entityType === 'sales_reconciliation'
-      ? 'salesRecon'
-      : 'cashDeposit';
+        ? 'salesRecon'
+        : 'cashDeposit';
 
     if (user.roleCode !== 'ADM') {
       const perms = user.permissions?.[moduleKey];

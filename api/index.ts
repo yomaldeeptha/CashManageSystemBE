@@ -1,21 +1,25 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createNestApp } from '../src/bootstrap';
 
-let cachedHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
+type RequestHandler = (req: IncomingMessage, res: ServerResponse) => void;
 
-async function getHandler() {
-  if (!cachedHandler) {
-    const app = await createNestApp();
-    await app.init();
-    cachedHandler = app.getHttpAdapter().getInstance() as (
-      req: IncomingMessage,
-      res: ServerResponse,
-    ) => void;
-  }
-  return cachedHandler;
-}
+    let cachedHandlerPromise: Promise<RequestHandler> | null = null;
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
-  const expressApp = await getHandler();
-  return expressApp(req, res);
-}
+    function getHandler(): Promise<RequestHandler> {
+      if (!cachedHandlerPromise) {
+        cachedHandlerPromise = (async () => {
+          const app = await createNestApp();
+          await app.init();
+          return app.getHttpAdapter().getInstance() as RequestHandler;
+        })().catch((err) => {
+          cachedHandlerPromise = null;
+          throw err;
+        });
+      }
+      return cachedHandlerPromise;
+    }
+
+    export default async function handler(req: IncomingMessage, res: ServerResponse) {
+      const expressApp = await getHandler();
+      return expressApp(req, res);
+    }
