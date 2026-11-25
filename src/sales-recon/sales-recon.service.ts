@@ -68,11 +68,14 @@ export class SalesReconService {
         lines: { include: { currency: true } };
       };
     }>,
+    preloadedLogs?: Array<{ step: string; performedByName: string; createdAt: Date; toStatus: string | null; action: string }>,
   ) {
-    const logs = await this.prisma.auditLog.findMany({
-      where: { entityType: 'sales_reconciliation', entityId: r.id },
-      orderBy: { createdAt: 'asc' },
-    });
+    const logs =
+      preloadedLogs ??
+      (await this.prisma.auditLog.findMany({
+        where: { entityType: 'sales_reconciliation', entityId: r.id },
+        orderBy: { createdAt: 'asc' },
+      }));
 
     return {
       id: r.id,
@@ -88,6 +91,7 @@ export class SalesReconService {
       shift: r.shift?.name || 'Shift 1 - Morning',
       cashierId: r.cashierId,
       cashier: r.cashier?.name || 'Unassigned',
+      createdById: r.createdById ?? r.createUserId ?? null,
       shiftStatus: r.shiftStatus,
       baseCurrency: r.baseCurrencyCode,
       posGrossSales: toNumber(r.posGrossSales),
@@ -150,7 +154,7 @@ export class SalesReconService {
       if (query.status === 'shortage') {
         where.varianceAmount = { lt: 0 };
       } else if (query.status === 'matched') {
-        where.varianceAmount = { equals: 0 };
+        where.varianceAmount = { gt: -0.01, lt: 0.01 };
       } else if (query.status === 'in-review') {
         where.status = 'In Review';
       } else {
@@ -179,7 +183,109 @@ export class SalesReconService {
       orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
     });
 
-    return Promise.all(rows.map((r) => this.serialize(r)));
+    const ids = rows.map((r) => r.id);
+    const allLogs =
+      ids.length > 0
+        ? await this.prisma.auditLog.findMany({
+            where: { entityType: 'sales_reconciliation', entityId: { in: ids } },
+            orderBy: { createdAt: 'asc' },
+          })
+        : [];
+    const logsById = new Map<number, typeof allLogs>();
+    for (const log of allLogs) {
+      const bucket = logsById.get(log.entityId) || [];
+      bucket.push(log);
+      logsById.set(log.entityId, bucket);
+    }
+
+    return Promise.all(rows.map((r) => this.serialize(r, logsById.get(r.id) || [])));
+  }
+
+  async listVarianceIncidents(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; status?: string },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const where: Prisma.VarianceIncidentWhereInput = {};
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true },
+    );
+    if (query?.status && query.status !== 'all') {
+      where.auditStatus = { equals: query.status, mode: 'insensitive' };
+    }
+    const rows = await this.prisma.varianceIncident.findMany({
+      where,
+      include: { outlet: true, branch: true, company: true },
+      orderBy: [{ incidentDate: 'desc' }, { id: 'desc' }],
+    });
+    return rows.map((v) => ({
+      id: v.id,
+      incidentCode: v.incidentCode,
+      incidentDate: formatIsoDate(v.incidentDate),
+      companyId: v.companyId,
+      company: v.company.name,
+      branchId: v.branchId,
+      branch: v.branch.name,
+      outletId: v.outletId,
+      outlet: v.outlet.name,
+      shiftTime: v.shiftTime,
+      cashierName: v.cashierName,
+      type: v.type,
+      posExpectedAmount: toNumber(v.posExpectedAmount),
+      actualCountAmount: toNumber(v.actualCountAmount),
+      varianceAmount: toNumber(v.varianceAmount),
+      rootCause: v.rootCause,
+      cashierExplanation: v.cashierExplanation || '',
+      checkerAction: v.checkerAction || '',
+      recoveryMode: v.recoveryMode || '',
+      auditStatus: v.auditStatus,
+    }));
+  }
+
+  async updateVarianceIncident(
+    user: AuthenticatedUser,
+    id: number,
+    body: { auditStatus?: string; checkerAction?: string; recoveryMode?: string; cashierExplanation?: string },
+  ) {
+    const existing = await this.prisma.varianceIncident.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException(`Variance incident #${id} not found.`);
+    await assertEntityScope(this.prisma, user, existing);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.varianceIncident.update({
+        where: { id },
+        data: {
+          ...(body.auditStatus ? { auditStatus: body.auditStatus } : {}),
+          ...(body.checkerAction !== undefined ? { checkerAction: body.checkerAction } : {}),
+          ...(body.recoveryMode !== undefined ? { recoveryMode: body.recoveryMode } : {}),
+          ...(body.cashierExplanation !== undefined ? { cashierExplanation: body.cashierExplanation } : {}),
+          updateUserId: user.id,
+        },
+        include: { outlet: true, branch: true, company: true },
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logUpdate({
+          tableName: 'VarianceIncident',
+          recordId: id,
+          recordCode: existing.incidentCode,
+          oldValues: existing,
+          newValues: next,
+          actor: user,
+          tx,
+        });
+      }
+      return next;
+    });
+    return {
+      id: updated.id,
+      incidentCode: updated.incidentCode,
+      auditStatus: updated.auditStatus,
+      checkerAction: updated.checkerAction || '',
+      recoveryMode: updated.recoveryMode || '',
+      cashierExplanation: updated.cashierExplanation || '',
+    };
   }
 
   async getOne(user: AuthenticatedUser, id: number) {

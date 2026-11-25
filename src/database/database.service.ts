@@ -60,16 +60,4 @@ export class DatabaseService {
       throw error;
     }
   }
-
-  async getPublicTableCount(): Promise<number> {
-    if (!this.sqlClient) {
-      return 0;
-    }
-    const rows = (await this.sqlClient`
-      SELECT count(*)::int AS table_count
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-    `) as Array<{ table_count: number }>;
-    return Number(rows[0]?.table_count || 0);
-  }
 }

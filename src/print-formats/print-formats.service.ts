@@ -134,6 +134,47 @@ export class PrintFormatsService {
           })),
         };
       }
+    } else if (tpl.templateKey === 'PRINT-06') {
+      const outlets = await this.prisma.outlet.findMany({
+        where: !scope.unrestricted
+          ? { isActive: true, id: { in: scope.outletIds } }
+          : { isActive: true },
+        include: { branch: true },
+        orderBy: { id: 'asc' },
+      });
+      const recons = await this.prisma.salesReconciliation.findMany({
+        where: docScopeWhere,
+        orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+        take: 50,
+      });
+      const deposits = await this.prisma.cashDeposit.findMany({
+        where: docScopeWhere,
+        orderBy: [{ collectionDate: 'desc' }, { id: 'desc' }],
+        take: 50,
+      });
+      const outletRows = outlets.map((o) => {
+        const latestRecon = recons.find((r) => r.outletId === o.id);
+        const latestDep = deposits.find((d) => d.outletId === o.id);
+        return {
+          outlet: o.name,
+          branch: o.branch.name,
+          reconDocNo: latestRecon?.docNo || 'Pending',
+          depositDocNo: latestDep?.docNo || 'Pending',
+          netSalesBase: latestRecon ? toNumber(latestRecon.netSales) : 0,
+          depositBase: latestDep ? toNumber(latestDep.totalBaseAmount) : 0,
+          periodLock: latestRecon?.isPeriodLocked ? 'Locked' : latestRecon?.status || 'Open',
+        };
+      });
+      const closedCount = outletRows.filter((r) => ['Approved', 'Posted', 'Locked'].includes(r.periodLock)).length;
+      latestDocument = {
+        docNo: `EOD-${new Date().toISOString().slice(0, 10)}`,
+        docDate: new Date().toISOString().slice(0, 10),
+        totalOutlets: outletRows.length,
+        closedOutlets: closedCount,
+        readinessPercent: outletRows.length > 0 ? Math.round((closedCount / outletRows.length) * 100) : 0,
+        status: closedCount === outletRows.length && outletRows.length > 0 ? 'Ready for Close' : 'In Progress',
+        outlets: outletRows,
+      };
     } else {
       const recon = await this.prisma.salesReconciliation.findFirst({
         where: docScopeWhere,

@@ -78,23 +78,30 @@ export class CashDepositService {
         denominations: { include: { currency: true } };
       };
     }>,
+    preloaded?: {
+      attachments?: Array<{ id: number; fileName: string; fileSizeLabel: string; docType: string; remark: string | null; createdAt: Date; uploadedByName: string }>;
+      auditLogs?: Array<{ step: string; performedByName: string; createdAt: Date; toStatus: string | null; action: string }>;
+    },
   ) {
-    const [attachments, auditLogs] = await Promise.all([
-      this.prisma.documentAttachment.findMany({
-        where: { entityType: 'cash_deposit', entityId: d.id },
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.auditLog.findMany({
-        where: { entityType: 'cash_deposit', entityId: d.id },
-        orderBy: { createdAt: 'asc' },
-      }),
-    ]);
+    const [attachments, auditLogs] = preloaded
+      ? [preloaded.attachments || [], preloaded.auditLogs || []]
+      : await Promise.all([
+          this.prisma.documentAttachment.findMany({
+            where: { entityType: 'cash_deposit', entityId: d.id },
+            orderBy: { createdAt: 'desc' },
+          }),
+          this.prisma.auditLog.findMany({
+            where: { entityType: 'cash_deposit', entityId: d.id },
+            orderBy: { createdAt: 'asc' },
+          }),
+        ]);
 
     const denomMap: Record<string, Record<string, number>> = {};
     for (const dn of d.denominations) {
       const code = dn.currency.code;
       if (!denomMap[code]) denomMap[code] = {};
-      denomMap[code][String(toNumber(dn.denominationValue, 0))] = dn.noteCount;
+      const val = toNumber(dn.denominationValue, 2);
+      denomMap[code][Number.isInteger(val) ? String(val) : String(val)] = dn.noteCount;
     }
 
     return {
@@ -115,6 +122,7 @@ export class CashDepositService {
       cashCollectorId: d.cashCollectorId,
       cashCollector: d.cashCollector.name,
       cashCollectorEmpNo: d.cashCollector.empNo,
+      createdById: d.createdById ?? d.createUserId ?? null,
       paymentTypeId: d.paymentTypeId,
       collectionType: d.paymentType.name,
       envelopeNo: d.envelopeNo,
@@ -208,7 +216,42 @@ export class CashDepositService {
       }),
     ]);
 
-    const items = await Promise.all(rows.map((r) => this.serializeDeposit(r)));
+    const ids = rows.map((r) => r.id);
+    const [allAttachments, allLogs] =
+      ids.length > 0
+        ? await Promise.all([
+            this.prisma.documentAttachment.findMany({
+              where: { entityType: 'cash_deposit', entityId: { in: ids } },
+              orderBy: { createdAt: 'desc' },
+            }),
+            this.prisma.auditLog.findMany({
+              where: { entityType: 'cash_deposit', entityId: { in: ids } },
+              orderBy: { createdAt: 'asc' },
+            }),
+          ])
+        : [[], []];
+
+    const attById = new Map<number, typeof allAttachments>();
+    for (const a of allAttachments) {
+      const bucket = attById.get(a.entityId) || [];
+      bucket.push(a);
+      attById.set(a.entityId, bucket);
+    }
+    const logById = new Map<number, typeof allLogs>();
+    for (const l of allLogs) {
+      const bucket = logById.get(l.entityId) || [];
+      bucket.push(l);
+      logById.set(l.entityId, bucket);
+    }
+
+    const items = await Promise.all(
+      rows.map((r) =>
+        this.serializeDeposit(r, {
+          attachments: attById.get(r.id) || [],
+          auditLogs: logById.get(r.id) || [],
+        }),
+      ),
+    );
     return {
       items,
       meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
@@ -868,7 +911,7 @@ export class CashDepositService {
       { includeOutlet: true },
     );
     if (query?.pendingOnly) {
-      where.status = { in: ['Pending', 'Pending Acceptance', 'Under Review'] };
+      where.status = { in: ['Pending', 'Pending Acceptance', 'Submitted', 'Under Review'] };
     } else if (query?.status && query.status !== 'all') {
       where.status = { equals: query.status, mode: 'insensitive' };
     }
@@ -941,6 +984,7 @@ export class CashDepositService {
         narration: s.narration || '',
         remark: s.narration || '',
         status: s.status,
+        createdById: s.createdById ?? s.createUserId ?? null,
         lines: s.lines.map((l) => ({
           id: l.id,
           currency: l.currency.code,
@@ -1858,14 +1902,17 @@ export class CashDepositService {
   // TAB 8 (SCREEN 06): OUTLET BANK DEPOSIT & CARRY FORWARD
   // ============================================================================
 
-  async listBankDeposits(user: AuthenticatedUser, query?: { companyId?: number; search?: string }) {
+  async listBankDeposits(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.OutletBankDepositWhereInput = {};
     applyEntityScopeToWhere(
       where as Record<string, unknown>,
       scope,
-      { companyId: query?.companyId },
-      { includeBranch: true, includeOutlet: false },
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
     );
     if (query?.search) {
       where.OR = [
@@ -1959,6 +2006,10 @@ export class CashDepositService {
     }
 
     const isBank = dto.processFlowDecision === 'bank';
+    const bankRefNo = (dto.depositBankRefNo || '').trim() || (isBank ? '' : `CF-${Date.now().toString().slice(-6)}`);
+    if (isBank && !bankRefNo) {
+      throw new BadRequestException('Bank deposit slip reference number is required for Bank Deposit.');
+    }
     const depositAccountName = isBank
       ? dto.depositAccount || 'Corporate General Bank Account'
       : 'Carried Forward Next Day Vault Float';
@@ -2010,7 +2061,7 @@ export class CashDepositService {
           companyId: scope.companyId,
           branchId: scope.branchId,
           outletId: scope.outletId,
-          depositBankRefNo: dto.depositBankRefNo.trim(),
+          depositBankRefNo: bankRefNo,
           currencyId: cur.id,
           bankAccountId: dto.bankAccountId || null,
           depositAccountName,
@@ -2142,12 +2193,27 @@ export class CashDepositService {
   // TAB 9: BANK RECONCILIATION
   // ============================================================================
 
-  async listBankReconciliations(user: AuthenticatedUser) {
+  async listBankReconciliations(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; status?: string; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.BankReconciliationWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.outletId = { in: scope.outletIds };
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true },
+    );
+    if (query?.status && query.status !== 'all') {
+      where.status = { equals: query.status, mode: 'insensitive' };
+    }
+    if (query?.search) {
+      where.OR = [
+        { docCode: { contains: query.search, mode: 'insensitive' } },
+        { depositBankRefNo: { contains: query.search, mode: 'insensitive' } },
+        { statementRef: { contains: query.search, mode: 'insensitive' } },
+      ];
     }
 
     const rows = await this.prisma.bankReconciliation.findMany({

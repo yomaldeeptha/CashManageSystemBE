@@ -53,6 +53,33 @@ export class SalesReconController {
     return this.service.getProcess01Envelopes(user, outletId ? Number(outletId) : undefined);
   }
 
+  @Get('variance-incidents')
+  @RequirePermission('salesRecon', 'read')
+  @ApiOperation({ summary: 'List Sales Reconciliation Variance Incidents (scoped to user entities)' })
+  listVarianceIncidents(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.service.listVarianceIncidents(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+      status,
+    });
+  }
+
+  @Patch('variance-incidents/:id')
+  @RequirePermission('salesRecon', 'approve')
+  @ApiOperation({ summary: 'Update or resolve a Sales Reconciliation Variance Incident' })
+  resolveVarianceIncident(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { auditStatus?: string; checkerAction?: string; recoveryMode?: string; cashierExplanation?: string },
+  ) {
+    return this.service.updateVarianceIncident(user, id, body);
+  }
+
   @Get(':id')
   @RequirePermission('salesRecon', 'read')
   @ApiOperation({ summary: 'Get single Sales Reconciliation with shift tender lines and audit trail' })

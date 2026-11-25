@@ -493,9 +493,9 @@ export class CreateOutletBankDepositDto {
   @IsInt()
   outletId?: number;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  depositBankRefNo!: string;
+  depositBankRefNo?: string;
 
   @IsOptional()
   @IsString()
@@ -537,9 +537,9 @@ export class ImportBankStatementRowDto {
   @IsNotEmpty()
   statementRef!: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  statementDate!: string;
+  statementDate?: string;
 
   @Type(() => Number)
   @IsNumber()

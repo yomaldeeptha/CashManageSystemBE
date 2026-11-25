@@ -8,7 +8,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 export class SalesReconLineInputDto {
   @IsOptional()
@@ -16,10 +16,12 @@ export class SalesReconLineInputDto {
   @IsInt()
   shiftId?: number;
 
+  @Transform(({ value, obj }) => value ?? obj?.shiftName ?? 'Shift 1 - Morning')
   @IsString()
   @IsNotEmpty()
   shift!: string;
 
+  @Transform(({ value, obj }) => value ?? obj?.cashierName ?? 'Outlet Cashier')
   @IsString()
   @IsNotEmpty()
   cashier!: string;
@@ -29,18 +31,22 @@ export class SalesReconLineInputDto {
   @IsNumber()
   shiftTotalSales?: number;
 
+  @Transform(({ value, obj }) => value ?? obj?.bankName ?? 'POS / Safe')
   @IsString()
   @IsNotEmpty()
   bank!: string;
 
+  @Transform(({ value, obj }) => value ?? obj?.paymentTypeName ?? obj?.mode ?? 'Cash')
   @IsString()
   @IsNotEmpty()
   paymentType!: string;
 
+  @Transform(({ value, obj }) => value ?? obj?.subTypeName ?? '')
   @IsOptional()
   @IsString()
   subType?: string;
 
+  @Transform(({ value, obj }) => value ?? obj?.currencyCode ?? 'USD')
   @IsString()
   @IsNotEmpty()
   currency!: string;
@@ -104,6 +110,7 @@ export class CreateSalesReconDto {
   @Min(0)
   posGrossSales = 0;
 
+  @Transform(({ value, obj }) => value ?? obj?.returnsAmount ?? 0)
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
@@ -149,9 +156,24 @@ export class ImportSalesReconBatchDto {
   @IsInt()
   companyId!: number;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  branchId?: number;
+
   @Type(() => Number)
   @IsInt()
   outletId!: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  shiftId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  cashierId?: number;
 
   @IsOptional()
   @IsString()

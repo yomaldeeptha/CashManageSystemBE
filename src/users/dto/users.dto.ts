@@ -10,7 +10,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class MenuAuthInputDto {
@@ -37,6 +37,9 @@ export class CreateUserDto {
   email!: string;
 
   @ApiPropertyOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  )
   @IsOptional()
   @IsString()
   @MinLength(8)

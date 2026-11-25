@@ -366,6 +366,14 @@ export class ApprovalsService {
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.approvalTemplate.findUnique({ where: { id } });
       if (!existing) throw new NotFoundException(`Approval template #${id} not found.`);
+      const activeInstances = await tx.approvalInstance.count({
+        where: { templateId: id, status: { in: ['Pending', 'In Review'] } },
+      });
+      if (activeInstances > 0) {
+        throw new BadRequestException(
+          `Cannot delete approval template "${existing.name}" because ${activeInstances} pending approval request(s) currently depend on it.`,
+        );
+      }
       await tx.approvalTemplate.delete({ where: { id } });
       if (this.changeLogService) {
         await this.changeLogService.logDelete({
@@ -506,7 +514,7 @@ export class ApprovalsService {
       where as Record<string, unknown>,
       scope,
       { companyId, outletId },
-      { includeOutlet: true, allowNullOutlet: true },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
     );
 
     if (filterType === 'deposit') where.entityType = 'cash_deposit';
@@ -541,6 +549,18 @@ export class ApprovalsService {
       orderBy: { createdAt: 'desc' },
     });
 
+    const outletIdsToFetch = Array.from(
+      new Set(instances.map((i) => i.outletId).filter((id): id is number => typeof id === 'number')),
+    );
+    const outletsList =
+      outletIdsToFetch.length > 0
+        ? await this.prisma.outlet.findMany({
+            where: { id: { in: outletIdsToFetch } },
+            select: { id: true, name: true },
+          })
+        : [];
+    const outletNameMap = new Map(outletsList.map((o) => [o.id, o.name]));
+
     return instances.map((inst) => {
       const stages =
         inst.template?.stages.map((ts) => ({
@@ -563,14 +583,22 @@ export class ApprovalsService {
             ? 'petty'
             : 'recon';
 
+      const alreadyDecidedThisStage = inst.decisions.some(
+        (d) => d.stageOrder === inst.currentStageOrder && d.decidedById === user.id,
+      );
+      const hasApprovePerm =
+        user.roleCode === 'ADM' || Boolean(user.permissions?.approvals?.approve);
       const canCurrentUserApprove =
+        hasApprovePerm &&
+        !alreadyDecidedThisStage &&
         inst.submittedById !== user.id &&
         (user.roleCode === 'ADM' ||
           !activeStage ||
           activeStage.approvers.some(
-            (a) => a.userId === user.id && a.maxLimit >= toNumber(inst.amountBase),
+            (a) => a.userId === user.id && toDecimal(a.maxLimit).gte(toDecimal(inst.amountBase)),
           ));
 
+      const stageName = activeStage?.name || 'Finance Review';
       return {
         id: inst.id,
         entityType: inst.entityType,
@@ -581,14 +609,18 @@ export class ApprovalsService {
         companyId: inst.companyId,
         branchId: inst.branchId,
         outletId: inst.outletId,
+        outlet: inst.outletId ? outletNameMap.get(inst.outletId) || '' : 'Central / Head Office',
         requester: inst.submittedBy.fullName,
         submittedById: inst.submittedById,
         amount: toNumber(inst.amountBase),
         baseCurrency: inst.baseCurrencyCode,
+        baseCurrencyCode: inst.baseCurrencyCode,
+        templateName: inst.template?.name || 'Standard Approval Flow',
         triggerTerm: inst.triggerSummary || 'Standard Workflow',
         currentStageOrder: inst.currentStageOrder,
         totalStages: inst.totalStages,
-        activeStageName: activeStage?.name || 'Finance Review',
+        activeStageName: stageName,
+        currentStageName: stageName,
         stages,
         status: inst.status,
         canCurrentUserApprove,
@@ -683,18 +715,34 @@ export class ApprovalsService {
       }
     }
 
-    // Prevent duplicate approval by same user in the same stage
+    // Prevent duplicate decision (approve or reject) by same user in the same stage
     const alreadyDecidedThisStage = instance.decisions.some(
       (d) =>
         d.stageOrder === instance.currentStageOrder &&
-        d.decidedById === actor.id &&
-        d.decision === dto.decision,
+        d.decidedById === actor.id,
     );
     if (alreadyDecidedThisStage) {
       throw new BadRequestException('You have already recorded a decision for this approval stage.');
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
+      // Optimistic concurrency guard inside transaction
+      const claimed = await tx.approvalInstance.updateMany({
+        where: {
+          id: instance.id,
+          status: instance.status,
+          currentStageOrder: instance.currentStageOrder,
+        },
+        data: {
+          updateUserId: actor.id,
+        },
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException(
+          'This approval request was updated concurrently by another user. Please refresh and try again.',
+        );
+      }
+
       await tx.approvalDecision.create({
         data: {
           instanceId: instance.id,

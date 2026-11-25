@@ -55,6 +55,13 @@ export class PettyCashController {
     return this.service.createRequest(user, dto);
   }
 
+  @Post('requests/:id/submit')
+  @RequirePermission('pettyCash', 'update')
+  @ApiOperation({ summary: 'Submit a Draft/Rejected Petty Cash Request into the approval workflow' })
+  submitRequest(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseIntPipe) id: number) {
+    return this.service.submitRequest(user, id);
+  }
+
   @Post('requests/:id/approve')
   @RequirePermission('pettyCash', 'approve')
   @ApiOperation({ summary: 'Approve a Petty Cash Request (supports partial approved amount)' })
@@ -95,11 +102,13 @@ export class PettyCashController {
   listAdvances(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
     @Query('category') category?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listAdvances(user, {
       companyId: companyId ? Number(companyId) : undefined,
+      outletId,
       category,
       search,
     });
@@ -119,11 +128,13 @@ export class PettyCashController {
   listBills(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
     @Query('submissionType') submissionType?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listBillSubmissions(user, {
       companyId: companyId ? Number(companyId) : undefined,
+      outletId,
       submissionType,
       search,
     });
@@ -161,10 +172,12 @@ export class PettyCashController {
   listReturns(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listReturns(user, {
       companyId: companyId ? Number(companyId) : undefined,
+      outletId,
       search,
     });
   }
@@ -180,8 +193,15 @@ export class PettyCashController {
   @Get('reimbursements')
   @RequirePermission('pettyCash', 'read')
   @ApiOperation({ summary: 'List Float Account Reimbursement Claims' })
-  listReimbursements(@CurrentUser() user: AuthenticatedUser) {
-    return this.service.listReimbursements(user);
+  listReimbursements(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+  ) {
+    return this.service.listReimbursements(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+    });
   }
 
   @Post('reimbursements')
@@ -216,7 +236,14 @@ export class PettyCashController {
   @Get('iou-aging')
   @RequirePermission('pettyCash', 'read')
   @ApiOperation({ summary: 'Get live server-computed Employee Advance Outstanding (IOU) Aging Matrix' })
-  getIouAging(@CurrentUser() user: AuthenticatedUser) {
-    return this.service.getIouAging(user);
+  getIouAging(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+  ) {
+    return this.service.getIouAging(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+    });
   }
 }

@@ -5,7 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { ChangeLogService } from '../common/audit/audit.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
-import { getEffectiveScope } from '../common/utils/scope.util';
+import { getEffectiveScope, invalidateAdminScopeCache } from '../common/utils/scope.util';
 import {
   formatIsoDate,
   parseDateOnly,
@@ -206,6 +206,7 @@ export class MasterDataService {
           code: d.code,
           name: d.name,
           head: d.headOfDepartment || '',
+          hod: d.headOfDepartment || '',
           budgetCode: d.budgetCode || '',
           status: d.isActive ? 'Active' : 'Inactive',
         }));
@@ -244,6 +245,8 @@ export class MasterDataService {
           name: e.name,
           department: e.department.name,
           designation: e.designation,
+          email: e.email || '',
+          phone: e.phone || '',
           contact: e.email || e.phone || '',
           status: e.isActive ? 'Active' : 'Inactive',
         }));
@@ -260,6 +263,7 @@ export class MasterDataService {
           startTime: s.startTime,
           endTime: s.endTime,
           hours: s.durationHours,
+          durationHours: s.durationHours,
           status: s.isActive ? 'Active' : 'Inactive',
         }));
         break;
@@ -644,9 +648,16 @@ export class MasterDataService {
       'formMaster',
     ];
 
-    const entries = await Promise.all(
-      catalogs.map(async (key) => [key, await this.listCatalog(key, user)] as const),
-    );
+    // Batch catalog queries in small chunks to prevent DB connection pool saturation
+    const entries: Array<readonly [string, Record<string, unknown>[]]> = [];
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < catalogs.length; i += CHUNK_SIZE) {
+      const slice = catalogs.slice(i, i + CHUNK_SIZE);
+      const chunkResults = await Promise.all(
+        slice.map(async (key) => [key, await this.listCatalog(key, user)] as const),
+      );
+      entries.push(...chunkResults);
+    }
     return Object.fromEntries(entries);
   }
 
@@ -1080,6 +1091,19 @@ export class MasterDataService {
           ? this.isActiveFromStatus(payload, Boolean(oldRecord.isActive))
           : Boolean(oldRecord.isActive);
 
+      if (!isActive && Boolean(oldRecord.isActive)) {
+        if (catalog === 'currency' && oldRecord.isBase) {
+          throw new BadRequestException(
+            'Cannot deactivate the active System Primary Base Currency. Switch the base currency first.',
+          );
+        }
+        if (catalog === 'floatAccount' && toNumber(oldRecord.currentBalance as string) > 0) {
+          throw new BadRequestException(
+            'Cannot deactivate a Float Account with a positive remaining balance.',
+          );
+        }
+      }
+
       let updatedRecord: Record<string, unknown>;
 
       switch (catalog) {
@@ -1142,7 +1166,9 @@ export class MasterDataService {
             data: {
               ...(payload.code !== undefined ? { code: this.str(payload.code).toUpperCase() } : {}),
               ...(payload.name !== undefined ? { name: this.str(payload.name) } : {}),
-              ...(payload.head !== undefined ? { headOfDepartment: this.str(payload.head) } : {}),
+              ...(payload.head !== undefined || payload.hod !== undefined
+                ? { headOfDepartment: this.str(payload.head ?? payload.hod) }
+                : {}),
               ...(payload.budgetCode !== undefined
                 ? { budgetCode: this.str(payload.budgetCode) }
                 : {}),
@@ -1173,10 +1199,18 @@ export class MasterDataService {
               ...(payload.departmentId !== undefined
                 ? { departmentId: this.num(payload.departmentId) }
                 : {}),
+              ...(payload.outletId !== undefined
+                ? { outletId: payload.outletId ? this.num(payload.outletId) : null }
+                : {}),
               ...(payload.designation !== undefined
                 ? { designation: this.str(payload.designation) }
                 : {}),
-              ...(payload.contact !== undefined ? { email: this.str(payload.contact) } : {}),
+              ...(payload.email !== undefined
+                ? { email: this.str(payload.email) || null }
+                : payload.contact !== undefined
+                  ? { email: this.str(payload.contact) || null }
+                  : {}),
+              ...(payload.phone !== undefined ? { phone: this.str(payload.phone) || null } : {}),
               isActive,
               ...updateStamp,
             },
@@ -1190,7 +1224,9 @@ export class MasterDataService {
               ...(payload.name !== undefined ? { name: this.str(payload.name) } : {}),
               ...(payload.startTime !== undefined ? { startTime: this.str(payload.startTime) } : {}),
               ...(payload.endTime !== undefined ? { endTime: this.str(payload.endTime) } : {}),
-              ...(payload.hours !== undefined ? { durationHours: this.num(payload.hours) } : {}),
+              ...(payload.hours !== undefined || payload.durationHours !== undefined
+                ? { durationHours: this.num(payload.hours ?? payload.durationHours) }
+                : {}),
               isActive,
               ...updateStamp,
             },
@@ -1618,55 +1654,66 @@ export class MasterDataService {
         if (toNumber(oldRecord.currentBalance as string) > 0) {
           throw new BadRequestException('Cannot delete a Float Account with a non-zero balance.');
         }
-        const [payRefs, advRefs, reimbRefs] = await Promise.all([
+        const [payRefs, setRefs, mainPayRefs, advRefs, reimbRefs] = await Promise.all([
           tx.cashierPayment.count({ where: { floatAccountId: id } }),
+          tx.cashierSettlement.count({ where: { floatAccountId: id } }),
+          tx.mainCashierPayment.count({ where: { floatAccountId: id } }),
           tx.pettyCashAdvance.count({ where: { floatAccountId: id } }),
           tx.floatReimbursement.count({ where: { floatAccountId: id } }),
         ]);
-        if (payRefs + advRefs + reimbRefs > 0) {
+        if (payRefs + setRefs + mainPayRefs + advRefs + reimbRefs > 0) {
           throw new BadRequestException(
             'Cannot delete this Float Account because it is referenced by existing financial transactions. Deactivate it instead.',
           );
         }
       }
       if (catalog === 'bankAccount') {
-        const [depRefs, setRefs] = await Promise.all([
+        const [depRefs, setRefs, recRefs] = await Promise.all([
           tx.outletBankDeposit.count({ where: { bankAccountId: id } }),
           tx.mainCashierSettlement.count({ where: { toBankAccountId: id } }),
+          tx.cashCollectionReceipt.count({ where: { bankAccountId: id } }),
         ]);
-        if (depRefs + setRefs > 0) {
+        if (depRefs + setRefs + recRefs > 0) {
           throw new BadRequestException(
             'Cannot delete this Bank Account because it is referenced by existing deposits/settlements. Deactivate it instead.',
           );
         }
       }
       if (catalog === 'vendor') {
-        const [payRefs, mainPayRefs] = await Promise.all([
+        const [payRefs, mainPayRefs, billRefs] = await Promise.all([
           tx.cashierPayment.count({ where: { vendorId: id } }),
           tx.mainCashierPayment.count({ where: { vendorId: id } }),
+          tx.pettyCashBillLine.count({ where: { vendorId: id } }),
         ]);
-        if (payRefs + mainPayRefs > 0) {
+        if (payRefs + mainPayRefs + billRefs > 0) {
           throw new BadRequestException(
-            'Cannot delete this Vendor because it is referenced by payment vouchers. Deactivate it instead.',
+            'Cannot delete this Vendor because it is referenced by payment vouchers or bill submissions. Deactivate it instead.',
           );
         }
       }
       if (catalog === 'employee') {
-        const [depRefs, pcrRefs, payRefs, srRefs] = await Promise.all([
+        const [depRefs, pcrRefs, payRefs, setRefs, advRefs, billRefs, srRefs, usrRefs] = await Promise.all([
           tx.cashDeposit.count({ where: { OR: [{ cashierId: id }, { cashCollectorId: id }] } }),
           tx.pettyCashRequest.count({ where: { requestedById: id } }),
-          tx.cashierPayment.count({ where: { cashierId: id } }),
+          tx.cashierPayment.count({ where: { OR: [{ cashierId: id }, { requesterId: id }] } }),
+          tx.cashierSettlement.count({ where: { OR: [{ fromCashierId: id }, { toCashierId: id }] } }),
+          tx.pettyCashAdvance.count({ where: { requesterId: id } }),
+          tx.pettyCashBillSubmission.count({ where: { employeeId: id } }),
           tx.salesReconciliation.count({ where: { cashierId: id } }),
+          tx.user.count({ where: { employeeId: id } }),
         ]);
-        if (depRefs + pcrRefs + payRefs + srRefs > 0) {
+        if (depRefs + pcrRefs + payRefs + setRefs + advRefs + billRefs + srRefs + usrRefs > 0) {
           throw new BadRequestException(
-            'Cannot delete this Employee because they are referenced by financial transactions. Deactivate them instead.',
+            'Cannot delete this Employee because they are referenced by financial transactions or user accounts. Deactivate them instead.',
           );
         }
       }
       if (catalog === 'shift') {
-        const srRefs = await tx.salesReconciliation.count({ where: { shiftId: id } });
-        if (srRefs > 0) {
+        const [srRefs, srLineRefs] = await Promise.all([
+          tx.salesReconciliation.count({ where: { shiftId: id } }),
+          tx.salesReconciliationLine.count({ where: { shiftId: id } }),
+        ]);
+        if (srRefs + srLineRefs > 0) {
           throw new BadRequestException(
             'Cannot delete this Shift because it is referenced by sales reconciliations. Deactivate it instead.',
           );
@@ -1674,6 +1721,9 @@ export class MasterDataService {
       }
 
       await delegate.delete({ where: { id } });
+      if (catalog === 'company' || catalog === 'branch' || catalog === 'outlet') {
+        invalidateAdminScopeCache();
+      }
 
       if (this.changeLogService) {
         await this.changeLogService.logDelete({

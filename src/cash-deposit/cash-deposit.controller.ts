@@ -317,10 +317,12 @@ export class CashDepositController {
   listBankDeposits(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listBankDeposits(user, {
       companyId: companyId ? Number(companyId) : undefined,
+      outletId,
       search,
     });
   }
@@ -339,8 +341,19 @@ export class CashDepositController {
   @Get('cash-deposit/bank-reconciliations')
   @RequirePermission('cashDeposit', 'read')
   @ApiOperation({ summary: 'List Outlet Bank Deposit Reconciliations' })
-  listBankRecons(@CurrentUser() user: AuthenticatedUser) {
-    return this.service.listBankReconciliations(user);
+  listBankRecons(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.service.listBankReconciliations(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+      status,
+      search,
+    });
   }
 
   @Post('cash-deposit/bank-reconciliations/import')

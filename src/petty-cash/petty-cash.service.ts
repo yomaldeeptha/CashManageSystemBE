@@ -90,17 +90,23 @@ export class PettyCashService {
       };
     }>,
     budgetMap: Map<number, { allocated: number; monthlyLimit: number; consumed: number; available: number }>,
+    preloaded?: {
+      attachments?: Array<{ id: number; fileName: string; fileSizeLabel: string; docType: string; remark: string | null; createdAt: Date }>;
+      logs?: Array<{ step: string; performedByName: string; createdAt: Date; toStatus: string | null; action: string }>;
+    },
   ) {
-    const [attachments, logs] = await Promise.all([
-      this.prisma.documentAttachment.findMany({
-        where: { entityType: 'petty_cash_request', entityId: r.id },
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.auditLog.findMany({
-        where: { entityType: 'petty_cash_request', entityId: r.id },
-        orderBy: { createdAt: 'asc' },
-      }),
-    ]);
+    const [attachments, logs] = preloaded
+      ? [preloaded.attachments || [], preloaded.logs || []]
+      : await Promise.all([
+          this.prisma.documentAttachment.findMany({
+            where: { entityType: 'petty_cash_request', entityId: r.id },
+            orderBy: { createdAt: 'desc' },
+          }),
+          this.prisma.auditLog.findMany({
+            where: { entityType: 'petty_cash_request', entityId: r.id },
+            orderBy: { createdAt: 'asc' },
+          }),
+        ]);
 
     const existingBudget = budgetMap.get(r.departmentId);
     const deptBudget = existingBudget || {
@@ -124,6 +130,7 @@ export class PettyCashService {
       department: r.department.name,
       requestedById: r.requestedById,
       requestedBy: r.requestedBy.name,
+      createdById: r.createdById ?? r.createUserId ?? null,
       employeeId: r.requestedBy.empNo,
       requesterTitle: r.requesterTitle || `${r.requestedBy.name} (${r.requestedBy.empNo})`,
       expenseCategoryId: r.expenseCategoryId,
@@ -211,7 +218,10 @@ export class PettyCashService {
         },
         orderBy: [{ requestDate: 'desc' }, { id: 'desc' }],
       }),
-      this.prisma.budget.findMany({ where: { isActive: true } }),
+      this.prisma.budget.findMany({
+        where: { isActive: true },
+        orderBy: [{ fiscalYear: 'asc' }, { id: 'asc' }],
+      }),
     ]);
 
     const budgetMap = new Map(
@@ -226,7 +236,42 @@ export class PettyCashService {
       ]),
     );
 
-    return Promise.all(rows.map((r) => this.serializeRequest(r, budgetMap)));
+    const ids = rows.map((r) => r.id);
+    const [allAttachments, allLogs] =
+      ids.length > 0
+        ? await Promise.all([
+            this.prisma.documentAttachment.findMany({
+              where: { entityType: 'petty_cash_request', entityId: { in: ids } },
+              orderBy: { createdAt: 'desc' },
+            }),
+            this.prisma.auditLog.findMany({
+              where: { entityType: 'petty_cash_request', entityId: { in: ids } },
+              orderBy: { createdAt: 'asc' },
+            }),
+          ])
+        : [[], []];
+
+    const attById = new Map<number, typeof allAttachments>();
+    for (const a of allAttachments) {
+      const bucket = attById.get(a.entityId) || [];
+      bucket.push(a);
+      attById.set(a.entityId, bucket);
+    }
+    const logById = new Map<number, typeof allLogs>();
+    for (const l of allLogs) {
+      const bucket = logById.get(l.entityId) || [];
+      bucket.push(l);
+      logById.set(l.entityId, bucket);
+    }
+
+    return Promise.all(
+      rows.map((r) =>
+        this.serializeRequest(r, budgetMap, {
+          attachments: attById.get(r.id) || [],
+          logs: logById.get(r.id) || [],
+        }),
+      ),
+    );
   }
 
   async createRequest(user: AuthenticatedUser, dto: CreatePettyCashRequestDto) {
@@ -330,6 +375,66 @@ export class PettyCashService {
     return list.find((r) => r.id === createdId);
   }
 
+  async submitRequest(user: AuthenticatedUser, id: number) {
+    const req = await this.prisma.pettyCashRequest.findUnique({ where: { id } });
+    if (!req) throw new NotFoundException(`Petty Cash Request #${id} not found.`);
+    await assertEntityScope(this.prisma, user, req);
+    if (!['Draft', 'Rejected'].includes(req.status)) {
+      throw new BadRequestException(
+        `Only Draft or Rejected Petty Cash Requests can be submitted (current: "${req.status}").`,
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.pettyCashRequest.update({
+        where: { id },
+        data: { status: 'Submitted', updateUserId: user.id },
+      });
+      await this.approvalsService.initiateApproval({
+        entityType: 'petty_cash_request',
+        documentKey: 'pettyCashAdvance',
+        entityId: req.id,
+        docNo: req.requestId,
+        title: `Advance: ${req.purpose.slice(0, 80)}`,
+        companyId: req.companyId,
+        branchId: req.branchId,
+        outletId: req.outletId,
+        submittedById: user.id,
+        amountBase: toNumber(req.baseAmount),
+        baseCurrencyCode: req.baseCurrencyCode,
+        tx,
+      });
+      if (this.changeLogService) {
+        await this.changeLogService.logAction({
+          action: 'STATUS_CHANGE',
+          tableName: 'PettyCashRequest',
+          recordId: id,
+          recordCode: req.requestId,
+          oldValues: req,
+          newValues: updated,
+          description: `Submitted Petty Cash Request ${req.requestId} for approval`,
+          actor: user,
+          tx,
+        });
+      }
+      await this.auditService.log({
+        entityType: 'petty_cash_request',
+        entityId: id,
+        docNo: req.requestId,
+        action: 'SUBMIT',
+        step: `Submitted Petty Cash Request ${req.requestId} for Approval`,
+        fromStatus: req.status,
+        toStatus: 'Submitted',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
+    });
+
+    const list = await this.listRequests(user);
+    return list.find((r) => r.id === id);
+  }
+
   async approveRequest(
     user: AuthenticatedUser,
     id: number,
@@ -340,7 +445,8 @@ export class PettyCashService {
     await assertEntityScope(this.prisma, user, req);
 
     if (body?.approvedAmount !== undefined) {
-      if (body.approvedAmount <= 0 || body.approvedAmount > toNumber(req.requestAmount)) {
+      const approvedDec = toDecimal(body.approvedAmount);
+      if (approvedDec.lte(0) || approvedDec.gt(toDecimal(req.requestAmount))) {
         throw new BadRequestException('Approved amount must be greater than 0 and not exceed requested amount.');
       }
     }
@@ -451,7 +557,10 @@ export class PettyCashService {
   // P2: PETTY CASH ADVANCES (DISBURSEMENT VOUCHER)
   // ============================================================================
 
-  async listAdvances(user: AuthenticatedUser, query?: { companyId?: number; category?: string; search?: string }) {
+  async listAdvances(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; category?: string; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const canSeeHiddenApproved = this.isApproverRole(user);
 
@@ -459,8 +568,8 @@ export class PettyCashService {
     applyEntityScopeToWhere(
       where as Record<string, unknown>,
       scope,
-      { companyId: query?.companyId },
-      { includeBranch: true, includeOutlet: false },
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
     );
     if (query?.category && query.category !== 'all') {
       where.expenseCategory = { equals: query.category, mode: 'insensitive' };
@@ -754,18 +863,18 @@ export class PettyCashService {
 
   async listBillSubmissions(
     user: AuthenticatedUser,
-    query?: { companyId?: number; submissionType?: string; search?: string },
+    query?: { companyId?: number; outletId?: string; submissionType?: string; search?: string },
   ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.PettyCashBillSubmissionWhereInput = {};
     applyEntityScopeToWhere(
       where as Record<string, unknown>,
       scope,
-      { companyId: query?.companyId },
-      { includeBranch: true, includeOutlet: false },
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
     );
     if (query?.submissionType && query.submissionType !== 'all') {
-      where.submissionType = query.submissionType;
+      where.submissionType = { equals: query.submissionType, mode: 'insensitive' };
     }
     if (query?.search) {
       where.OR = [
@@ -1220,14 +1329,17 @@ export class PettyCashService {
   // STEP 4: EMPLOYEE ADVANCE RETURN RECEIPT
   // ============================================================================
 
-  async listReturns(user: AuthenticatedUser, query?: { companyId?: number; search?: string }) {
+  async listReturns(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.PettyCashReturnWhereInput = {};
     applyEntityScopeToWhere(
       where as Record<string, unknown>,
       scope,
-      { companyId: query?.companyId },
-      { includeBranch: true, includeOutlet: false },
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
     );
     if (query?.search) {
       where.OR = [
@@ -1422,12 +1534,15 @@ export class PettyCashService {
         const existingIou = await tx.pettyCashIOU.findFirst({ where: { advanceId: adv.id } });
         if (existingIou) {
           const nextIouRetBase = toDecimal(existingIou.returnAmount).plus(baseAmount);
-          const nextIouPendingBase = Decimal.max(
-            0,
-            toDecimal(existingIou.advAmount)
-              .minus(toDecimal(existingIou.settledAmount))
-              .minus(nextIouRetBase),
-          );
+          // Prevent FX rate drift from leaving orphan non-zero pending amounts on fully closed advances
+          const nextIouPendingBase = closed
+            ? new Decimal(0)
+            : Decimal.max(
+                0,
+                toDecimal(existingIou.advAmount)
+                  .minus(toDecimal(existingIou.settledAmount))
+                  .minus(nextIouRetBase),
+              );
           await tx.pettyCashIOU.update({
             where: { id: existingIou.id },
             data: {
@@ -1475,13 +1590,18 @@ export class PettyCashService {
   // STEP 5: FLOAT REIMBURSEMENT & RECONCILIATION
   // ============================================================================
 
-  async listReimbursements(user: AuthenticatedUser) {
+  async listReimbursements(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.FloatReimbursementWhereInput = {};
-    if (!scope.unrestricted) {
-      where.companyId = { in: scope.companyIds };
-      where.branchId = { in: scope.branchIds };
-    }
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
+    );
 
     const rows = await this.prisma.floatReimbursement.findMany({
       where,
@@ -1737,16 +1857,28 @@ export class PettyCashService {
   // STEP 6: DYNAMIC SERVER-COMPUTED IOU AGING MATRIX
   // ============================================================================
 
-  async getIouAging(user?: AuthenticatedUser) {
+  async getIouAging(
+    user?: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string },
+  ) {
     let where: Prisma.PettyCashIOUWhereInput | undefined = undefined;
     if (user) {
       const scope = await getEffectiveScope(this.prisma, user);
-      if (!scope.unrestricted) {
+      const advWhere: Prisma.PettyCashAdvanceWhereInput = {};
+      applyEntityScopeToWhere(
+        advWhere as Record<string, unknown>,
+        scope,
+        { companyId: query?.companyId, outletId: query?.outletId },
+        { includeBranch: true, includeOutlet: true, allowNullOutlet: true },
+      );
+      if (Object.keys(advWhere).length > 0) {
         where = {
-          advance: {
-            companyId: { in: scope.companyIds },
-            branchId: { in: scope.branchIds },
-          },
+          OR: [
+            { advance: advWhere },
+            ...(scope.unrestricted && !query?.companyId && (!query?.outletId || query.outletId === 'all')
+              ? [{ advanceId: null }]
+              : []),
+          ],
         };
       }
     }

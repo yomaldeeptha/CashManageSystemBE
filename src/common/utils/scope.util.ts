@@ -16,6 +16,17 @@ export function isUnrestrictedAdmin(user: AuthenticatedUser): boolean {
   return isAdmin && !hasExplicitScope;
 }
 
+let adminScopeCache: {
+  expiresAt: number;
+  companyIds: number[];
+  branchIds: number[];
+  outletIds: number[];
+} | null = null;
+
+export function invalidateAdminScopeCache(): void {
+  adminScopeCache = null;
+}
+
 export async function getEffectiveScope(
   prisma: PrismaService,
   user: AuthenticatedUser,
@@ -26,16 +37,36 @@ export async function getEffectiveScope(
   outletIds: number[];
 }> {
   if (isUnrestrictedAdmin(user)) {
+    const now = Date.now();
+    if (adminScopeCache && adminScopeCache.expiresAt > now) {
+      return {
+        unrestricted: true,
+        companyIds: adminScopeCache.companyIds,
+        branchIds: adminScopeCache.branchIds,
+        outletIds: adminScopeCache.outletIds,
+      };
+    }
     const [companies, branches, outlets] = await Promise.all([
       prisma.company.findMany({ select: { id: true } }),
       prisma.branch.findMany({ select: { id: true } }),
       prisma.outlet.findMany({ select: { id: true } }),
     ]);
+    const companyIds = companies.map((c) => c.id);
+    const branchIds = branches.map((b) => b.id);
+    const outletIds = outlets.map((o) => o.id);
+    if (process.env.NODE_ENV !== 'test') {
+      adminScopeCache = {
+        expiresAt: now + 15_000,
+        companyIds,
+        branchIds,
+        outletIds,
+      };
+    }
     return {
       unrestricted: true,
-      companyIds: companies.map((c) => c.id),
-      branchIds: branches.map((b) => b.id),
-      outletIds: outlets.map((o) => o.id),
+      companyIds,
+      branchIds,
+      outletIds,
     };
   }
 

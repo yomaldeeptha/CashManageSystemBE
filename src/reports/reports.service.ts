@@ -79,11 +79,14 @@ export class ReportsService {
 
   // ---- View 0: Hub Cockpit ----
   async getHub(user: AuthenticatedUser, query?: ReportFilterQuery) {
-    const [baseInfo, rpt1, rpt2, rpt3, rpt4, rpt5, rpt6] = await Promise.all([
-      this.fxResolver.getSystemBaseCurrency(),
+    const baseInfo = await this.fxResolver.getSystemBaseCurrency();
+    // Run in 2 batches of 3 to avoid DB connection pool spikes
+    const [rpt1, rpt2, rpt3] = await Promise.all([
       this.getCashBankingReport(user, query),
       this.getSalesTenderReport(user, query),
       this.getPettyIouReport(user, query),
+    ]);
+    const [rpt4, rpt5, rpt6] = await Promise.all([
       this.getVarianceAuditReport(user, query),
       this.getCurrencyValuationReport(user, query),
       this.getAuditGovernanceReport(user, query),
@@ -154,25 +157,29 @@ export class ReportsService {
     let discrepanciesTotal = new Decimal(0);
     const currencyMixBase: Record<string, Decimal> = {};
 
+    let activeEnvelopeCount = 0;
     const rows = deposits.map((d) => {
       const amt = toDecimal(d.totalBaseAmount);
       const isVoid = ['Cancelled', 'Reversed'].includes(d.status);
-      if (!isVoid) {
-        totalCollections = totalCollections.plus(amt);
-        if (['Approved', 'Posted'].includes(d.status)) bankedTotal = bankedTotal.plus(amt);
-        else if (d.status === 'Rejected') discrepanciesTotal = discrepanciesTotal.plus(amt);
-        else inVaultTotal = inVaultTotal.plus(amt);
-      }
+      const linkedBank = d.bankDepositItems[0]?.bankDeposit;
 
       const curMap: Record<string, number> = {};
       for (const c of d.currencies) {
         curMap[c.currency.code] = toNumber(c.amount);
-        currencyMixBase[c.currency.code] = (currencyMixBase[c.currency.code] || new Decimal(0)).plus(
-          toDecimal(c.baseAmount),
-        );
+        if (!isVoid) {
+          currencyMixBase[c.currency.code] = (currencyMixBase[c.currency.code] || new Decimal(0)).plus(
+            toDecimal(c.baseAmount),
+          );
+        }
       }
 
-      const linkedBank = d.bankDepositItems[0]?.bankDeposit;
+      if (!isVoid) {
+        activeEnvelopeCount += 1;
+        totalCollections = totalCollections.plus(amt);
+        if (d.status === 'Posted' || Boolean(linkedBank)) bankedTotal = bankedTotal.plus(amt);
+        else if (d.status === 'Rejected') discrepanciesTotal = discrepanciesTotal.plus(amt);
+        else inVaultTotal = inVaultTotal.plus(amt);
+      }
 
       return {
         id: d.id,
@@ -220,7 +227,7 @@ export class ReportsService {
           : 0,
         inVaultTotal: toNumber(inVaultTotal),
         discrepanciesTotal: toNumber(discrepanciesTotal),
-        envelopeCount: rows.length,
+        envelopeCount: activeEnvelopeCount,
       },
       currencyMix,
       rows,
@@ -238,7 +245,11 @@ export class ReportsService {
         companyId: { in: companyIds },
         outletId: { in: outletIds },
         ...(dateFilter ? { docDate: dateFilter } : {}),
-        ...(query?.status === 'exceptions' ? { NOT: { varianceAmount: 0 } } : {}),
+        ...(query?.status && query.status !== 'all'
+          ? query.status === 'exceptions'
+            ? { NOT: { varianceAmount: 0 } }
+            : { status: { equals: query.status, mode: 'insensitive' } }
+          : {}),
         ...(query?.search
           ? {
               OR: [
@@ -396,7 +407,12 @@ export class ReportsService {
     });
 
     if (query?.status && query.status !== 'all') {
-      rows = rows.filter((r) => r.agingBucket === query.status);
+      const target = query.status.toLowerCase();
+      rows = rows.filter(
+        (r) =>
+          r.agingBucket.toLowerCase() === target ||
+          r.status.toLowerCase() === target,
+      );
     }
 
     for (const r of rows) {
@@ -442,7 +458,12 @@ export class ReportsService {
         outletId: { in: outletIds },
         ...(dateFilter ? { incidentDate: dateFilter } : {}),
         ...(query?.status && query.status !== 'all'
-          ? { type: { equals: query.status, mode: 'insensitive' } }
+          ? {
+              OR: [
+                { auditStatus: { equals: query.status, mode: 'insensitive' } },
+                { type: { equals: query.status, mode: 'insensitive' } },
+              ],
+            }
           : {}),
         ...(query?.search
           ? {
@@ -574,7 +595,9 @@ export class ReportsService {
       for (const c of d.currencies) {
         const h = holdingMap.get(c.currencyId);
         if (!h) continue;
-        if (['Submitted', 'In Review'].includes(d.status)) {
+        if (d.status === 'Draft') {
+          h.outletsTill = h.outletsTill.plus(toDecimal(c.amount));
+        } else if (['Submitted', 'In Review'].includes(d.status)) {
           h.transitBags = h.transitBags.plus(toDecimal(c.amount));
         } else {
           h.centralVault = h.centralVault.plus(toDecimal(c.amount));
@@ -707,7 +730,7 @@ export class ReportsService {
         : 100;
     const returnRate = Number((100 - firstPassRate).toFixed(1));
 
-    const lockedRecons = recons.filter((r) => r.isPeriodLocked || r.status === 'Locked' || r.status === 'Approved').length;
+    const lockedRecons = recons.filter((r) => r.isPeriodLocked || r.status === 'Locked').length;
     const periodLockCompliance =
       recons.length > 0 ? Number(((lockedRecons / recons.length) * 100).toFixed(1)) : 100;
 

@@ -192,13 +192,32 @@ export class AuditService {
     const scope = await getEffectiveScope(this.prisma, user);
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
 
-    const companyFilter =
-      filters?.companyId && (scope.unrestricted || scope.companyIds.includes(filters.companyId))
-        ? [filters.companyId]
-        : scope.companyIds;
+    if (
+      filters?.companyId &&
+      !scope.unrestricted &&
+      !scope.companyIds.includes(filters.companyId)
+    ) {
+      throw new ForbiddenException(
+        `You are not authorized to export records for Company ID ${filters.companyId}.`,
+      );
+    }
+
+    const companyFilter = filters?.companyId ? [filters.companyId] : scope.companyIds;
+    const parsedOutletId =
+      filters?.outletId && filters.outletId !== 'all' ? Number(filters.outletId) : null;
+    if (
+      parsedOutletId !== null &&
+      !Number.isNaN(parsedOutletId) &&
+      !scope.unrestricted &&
+      !scope.outletIds.includes(parsedOutletId)
+    ) {
+      throw new ForbiddenException(
+        `You are not authorized to export records for Outlet ID ${parsedOutletId}.`,
+      );
+    }
     const outletFilter =
-      filters?.outletId && filters.outletId !== 'all'
-        ? [Number(filters.outletId)].filter((id) => scope.unrestricted || scope.outletIds.includes(id))
+      parsedOutletId !== null && !Number.isNaN(parsedOutletId)
+        ? [parsedOutletId]
         : scope.outletIds;
 
     const [deposits, pettyRequests, recons, glAccounts] = await Promise.all([
@@ -216,6 +235,9 @@ export class AuditService {
           status: { in: ['Approved', 'Posted', 'Paid', 'Settled'] },
           companyId: { in: companyFilter },
           branchId: { in: scope.branchIds },
+          ...(parsedOutletId !== null && !Number.isNaN(parsedOutletId)
+            ? { outletId: parsedOutletId }
+            : {}),
         },
         include: { department: true, expenseCategory: { include: { glAccount: true } } },
         orderBy: { requestDate: 'desc' },
@@ -232,6 +254,18 @@ export class AuditService {
       this.prisma.glAccount.findMany({ where: { isActive: true } }),
     ]);
 
+    const approverIds = Array.from(
+      new Set(deposits.map((d) => d.approvedById).filter((id): id is number => typeof id === 'number')),
+    );
+    const approverUsers =
+      approverIds.length > 0
+        ? await this.prisma.user.findMany({
+            where: { id: { in: approverIds } },
+            select: { id: true, fullName: true },
+          })
+        : [];
+    const approverNameMap = new Map(approverUsers.map((u) => [u.id, u.fullName]));
+
     const salesGl = glAccounts.find((g) => g.code.startsWith('4000')) || {
       code: '4000-10',
       name: 'Outlet Daily Sales',
@@ -246,7 +280,9 @@ export class AuditService {
         docNo: d.docNo,
         docDate: d.docDate.toISOString().slice(0, 10),
         location: d.outlet.name,
-        approver: d.approvedById ? `Approver #${d.approvedById}` : 'Finance Manager',
+        approver: d.approvedById
+          ? approverNameMap.get(d.approvedById) || `Approver #${d.approvedById}`
+          : 'Finance Manager',
         glAccount: d.paymentType?.glAccount
           ? `${d.paymentType.glAccount.code} (${d.paymentType.glAccount.name})`
           : '1010-01 (Treasury In-Transit)',

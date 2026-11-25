@@ -1,10 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import Decimal from 'decimal.js';
 import { PrismaService } from '../database/prisma.service';
 import { ExchangeRateResolverService } from '../common/services/exchange-rate-resolver.service';
 import { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
 import { getEffectiveScope } from '../common/utils/scope.util';
-import { toDecimal, toNumber } from '../common/utils/decimal.util';
+import { formatIsoDate, toDecimal, toNumber } from '../common/utils/decimal.util';
 
 @Injectable()
 export class DashboardService {
@@ -20,14 +20,33 @@ export class DashboardService {
     const scope = await getEffectiveScope(this.prisma, user);
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
 
-    const companyIds =
-      query?.companyId && (scope.unrestricted || scope.companyIds.includes(query.companyId))
-        ? [query.companyId]
-        : scope.companyIds;
+    if (
+      query?.companyId &&
+      !scope.unrestricted &&
+      !scope.companyIds.includes(query.companyId)
+    ) {
+      throw new ForbiddenException(
+        `You are not authorized to view Dashboard data for Company ID ${query.companyId}.`,
+      );
+    }
 
+    const parsedOutletId =
+      query?.outletId && query.outletId !== 'all' ? Number(query.outletId) : null;
+    if (
+      parsedOutletId !== null &&
+      !Number.isNaN(parsedOutletId) &&
+      !scope.unrestricted &&
+      !scope.outletIds.includes(parsedOutletId)
+    ) {
+      throw new ForbiddenException(
+        `You are not authorized to view Dashboard data for Outlet ID ${parsedOutletId}.`,
+      );
+    }
+
+    const companyIds = query?.companyId ? [query.companyId] : scope.companyIds;
     const outletIds =
-      query?.outletId && query.outletId !== 'all'
-        ? [Number(query.outletId)].filter((id) => scope.unrestricted || scope.outletIds.includes(id))
+      parsedOutletId !== null && !Number.isNaN(parsedOutletId)
+        ? [parsedOutletId]
         : scope.outletIds;
 
     const dateFilter = query?.date
@@ -41,66 +60,88 @@ export class DashboardService {
 
     const [
       outlets,
-      deposits,
+      activeCashDeposits,
+      periodDeposits,
       pettyRequests,
       recons,
       ious,
       pendingApprovals,
       openVariances,
-      screensCount,
-      seriesCount,
+      floatAccounts,
     ] = await Promise.all([
       this.prisma.outlet.findMany({
         where: {
           isActive: true,
-          id: { in: outletIds },
-          branch: { companyId: { in: companyIds } },
+          ...(outletIds.length > 0 ? { id: { in: outletIds } } : { id: -1 }),
+          ...(companyIds.length > 0 ? { branch: { companyId: { in: companyIds } } } : {}),
         },
         include: { branch: true },
         orderBy: { id: 'asc' },
       }),
+      // All active unbanked deposits in scope (cash currently in hand / transit regardless of slip date)
+      this.prisma.cashDeposit.findMany({
+        where: {
+          companyId: { in: companyIds },
+          outletId: { in: outletIds },
+          status: { notIn: ['Posted', 'Rejected', 'Cancelled', 'Reversed'] },
+        },
+        include: {
+          outlet: true,
+          currencies: { include: { currency: true } },
+        },
+        orderBy: [{ collectionDate: 'desc' }, { id: 'desc' }],
+      }),
+      // Recent deposits in scope (optionally date-filtered for readiness matrix)
       this.prisma.cashDeposit.findMany({
         where: {
           companyId: { in: companyIds },
           outletId: { in: outletIds },
           ...(dateFilter ? { collectionDate: dateFilter } : {}),
         },
-        include: { currencies: { include: { currency: true } } },
+        include: { outlet: true },
         orderBy: [{ collectionDate: 'desc' }, { id: 'desc' }],
       }),
       this.prisma.pettyCashRequest.findMany({
         where: {
           companyId: { in: companyIds },
           branchId: { in: scope.branchIds },
-          ...(dateFilter ? { requestDate: dateFilter } : {}),
+          ...(parsedOutletId !== null && !Number.isNaN(parsedOutletId)
+            ? { outletId: parsedOutletId }
+            : {}),
         },
+        include: { department: true, requestedBy: true },
         orderBy: [{ requestDate: 'desc' }, { id: 'desc' }],
+        take: 50,
       }),
       this.prisma.salesReconciliation.findMany({
         where: {
           companyId: { in: companyIds },
           outletId: { in: outletIds },
-          ...(dateFilter ? { docDate: dateFilter } : {}),
         },
+        include: { outlet: true, shift: true },
         orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+        take: 100,
       }),
       this.prisma.pettyCashIOU.findMany({
         where: {
-          advance: {
-            companyId: { in: companyIds },
-            branchId: { in: scope.branchIds },
-          },
+          OR: [
+            {
+              advance: {
+                companyId: { in: companyIds },
+                branchId: { in: scope.branchIds },
+              },
+            },
+            ...(scope.unrestricted ? [{ advanceId: null }] : []),
+          ],
         },
       }),
       this.prisma.approvalInstance.findMany({
         where: {
           status: { in: ['Pending', 'In Review'] },
           companyId: { in: companyIds },
-          ...(!scope.unrestricted
+          ...(!scope.unrestricted || (parsedOutletId !== null && !Number.isNaN(parsedOutletId))
             ? { OR: [{ outletId: null }, { outletId: { in: outletIds } }] }
-            : query?.outletId && query.outletId !== 'all'
-              ? { OR: [{ outletId: null }, { outletId: { in: outletIds } }] }
-              : {}),
+            : {}),
         },
       }),
       this.prisma.varianceIncident.findMany({
@@ -110,13 +151,33 @@ export class DashboardService {
           auditStatus: 'Investigating',
         },
       }),
-      this.prisma.screen.count({ where: { isActive: true } }),
-      this.prisma.numberSeries.count({ where: { status: 'Active' } }),
+      this.prisma.floatAccount.findMany({
+        where: {
+          isActive: true,
+          ...(parsedOutletId !== null && !Number.isNaN(parsedOutletId)
+            ? { OR: [{ outletId: null }, { outletId: parsedOutletId }] }
+            : !scope.unrestricted
+              ? { OR: [{ outletId: null }, { outletId: { in: outletIds } }] }
+              : {}),
+        },
+        select: { baseLimit: true, currentBalance: true },
+      }),
     ]);
 
-    // 1. Daily Close Readiness
+    const [screensCount, seriesCount, notifCount, printCount] = await Promise.all([
+      this.prisma.screen.count({ where: { isActive: true } }),
+      this.prisma.numberSeries.count({ where: { status: 'Active' } }),
+      this.prisma.notificationTemplate.count({ where: { isActive: true } }),
+      this.prisma.printTemplate.count({ where: { isActive: true } }),
+    ]);
+
+    // 1. Daily Close Readiness (prefer selected-date recons if present, otherwise latest outlet recon)
+    const reconsForDate = dateFilter
+      ? recons.filter((r) => r.docDate >= dateFilter.gte && r.docDate <= dateFilter.lte)
+      : recons;
+    const effectiveRecons = reconsForDate.length > 0 ? reconsForDate : recons;
     const closedOutletIds = new Set(
-      recons
+      effectiveRecons
         .filter((r) => ['Approved', 'Posted', 'Locked'].includes(r.status))
         .map((r) => r.outletId),
     );
@@ -124,16 +185,13 @@ export class DashboardService {
     const completedOutlets = outlets.filter((o) => closedOutletIds.has(o.id)).length;
     const readinessPct = totalOutlets > 0 ? Math.round((completedOutlets / totalOutlets) * 100) : 0;
 
-    // 2. Cash in Hand (active unbanked deposits — exclude Posted, Rejected, Cancelled, Reversed)
-    const activeDeposits = deposits.filter(
-      (d) => !['Posted', 'Rejected', 'Cancelled', 'Reversed'].includes(d.status),
-    );
-    const cashInHandBase = activeDeposits.reduce(
+    // 2. Cash in Hand (all active unbanked deposits in scope)
+    const cashInHandBase = activeCashDeposits.reduce(
       (sum, d) => sum.plus(toDecimal(d.totalBaseAmount)),
       new Decimal(0),
     );
     const curTotals: Record<string, Decimal> = {};
-    for (const d of activeDeposits) {
+    for (const d of activeCashDeposits) {
       for (const c of d.currencies) {
         const code = c.currency.code;
         curTotals[code] = (curTotals[code] || new Decimal(0)).plus(toDecimal(c.amount));
@@ -143,14 +201,18 @@ export class DashboardService {
       ([code, amt]) => `${code} ${toNumber(amt).toLocaleString('en-US', { maximumFractionDigits: 0 })}`,
     );
 
-    // 3. Unreconciled Sales Variance
-    const varianceRecons = recons.filter((r) => toDecimal(r.varianceAmount).abs().gte(0.01));
+    // 3. Unreconciled Sales Variance (exclude Approved / Posted / Locked reconciliations)
+    const varianceRecons = effectiveRecons.filter(
+      (r) =>
+        !['Approved', 'Posted', 'Locked'].includes(r.status) &&
+        toDecimal(r.varianceAmount).abs().gte(0.01),
+    );
     const totalUnreconciledAbs = varianceRecons.reduce(
       (sum, r) => sum.plus(toDecimal(r.varianceAmount).abs()),
       new Decimal(0),
     );
 
-    // 4. Pending IOUs
+    // 4. Pending IOUs & Float Limit
     const todayMs = Date.now();
     const openIous = ious
       .map((iou) => ({
@@ -164,6 +226,14 @@ export class DashboardService {
 
     const totalPendingIou = openIous.reduce((s, x) => s.plus(x.pending), new Decimal(0));
     const oldestDays = openIous.reduce((max, x) => Math.max(max, x.ageDays), 0);
+    const floatLimitBase = floatAccounts.reduce(
+      (s, f) => s.plus(toDecimal(f.baseLimit)),
+      new Decimal(0),
+    );
+    const floatBalanceBase = floatAccounts.reduce(
+      (s, f) => s.plus(toDecimal(f.currentBalance)),
+      new Decimal(0),
+    );
 
     // 5. Approvals Queue
     const depApprovals = pendingApprovals.filter((a) => a.entityType === 'cash_deposit').length;
@@ -171,13 +241,14 @@ export class DashboardService {
     const srecApprovals = pendingApprovals.filter((a) => a.entityType === 'sales_reconciliation').length;
 
     // 6. Control Exceptions
-    const rejectedDeposits = deposits.filter((d) => d.status === 'Rejected').length;
+    const rejectedDeposits = periodDeposits.filter((d) => d.status === 'Rejected').length;
     const totalExceptions = openVariances.length + rejectedDeposits;
 
     // Outlet Readiness Matrix
+    const depositsPool = periodDeposits.length > 0 ? periodDeposits : activeCashDeposits;
     const outletReadiness = outlets.map((o) => {
-      const latestRecon = recons.find((r) => r.outletId === o.id);
-      const latestDeposit = deposits.find((d) => d.outletId === o.id);
+      const latestRecon = effectiveRecons.find((r) => r.outletId === o.id);
+      const latestDeposit = depositsPool.find((d) => d.outletId === o.id);
       return {
         outletId: o.id,
         outlet: o.name,
@@ -201,22 +272,64 @@ export class DashboardService {
       };
     });
 
+    // Recent real database activities across all 3 core transaction modules
+    const recentActivities = [
+      ...activeCashDeposits.slice(0, 5).map((d) => ({
+        id: `dep-${d.id}`,
+        entityId: d.id,
+        type: 'deposit',
+        module: 'cash-deposit',
+        docNo: d.docNo,
+        date: formatIsoDate(d.collectionDate),
+        label: d.outlet?.name || 'Outlet Deposit',
+        amountBase: toNumber(d.totalBaseAmount),
+        status: d.status,
+      })),
+      ...pettyRequests.slice(0, 5).map((p) => ({
+        id: `pcr-${p.id}`,
+        entityId: p.id,
+        type: 'petty',
+        module: 'petty-cash',
+        docNo: p.requestId,
+        date: formatIsoDate(p.requestDate),
+        label: p.requestedBy?.name || p.department?.name || 'Petty Cash',
+        amountBase: toNumber(p.baseAmount),
+        status: p.status,
+      })),
+      ...recons.slice(0, 5).map((r) => ({
+        id: `srec-${r.id}`,
+        entityId: r.id,
+        type: 'recon',
+        module: 'sales-recon',
+        docNo: r.docNo,
+        date: formatIsoDate(r.docDate),
+        label: `${r.outlet?.name || 'Outlet'}${r.shift?.name ? ` • ${r.shift.name}` : ''}`,
+        amountBase: toNumber(r.netSales),
+        status: r.status,
+      })),
+    ]
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+      .slice(0, 8);
+
     return {
       baseCurrency: baseInfo.code,
       baseSymbol: baseInfo.symbol,
       kpis: {
+        baseCurrency: baseInfo.code,
         dailyCloseReadiness: {
           percentage: readinessPct,
           completed: completedOutlets,
+          closedOutlets: completedOutlets,
           total: totalOutlets,
-          statusText: `${completedOutlets} of ${totalOutlets} Outlets Closed & Verified`,
+          totalOutlets,
+          statusText: `${completedOutlets} of ${totalOutlets} Outlets Closed`,
         },
         cashInHand: {
           amountUSD: toNumber(cashInHandBase),
           amountBase: toNumber(cashInHandBase),
           baseCurrency: baseInfo.code,
           breakdown: breakdownParts.join(' | ') || `${baseInfo.code} 0`,
-          trend: `${activeDeposits.length} active slips`,
+          trend: `${activeCashDeposits.length} active slips`,
         },
         unreconciledSales: {
           amountUSD: toNumber(totalUnreconciledAbs),
@@ -224,7 +337,7 @@ export class DashboardService {
           exceptionsCount: varianceRecons.length,
           statusText:
             varianceRecons.length > 0
-              ? `${varianceRecons.length} Variance awaiting explanation`
+              ? `${varianceRecons.length} variance(s) open`
               : 'All Shifts Balanced',
         },
         pendingIOUs: {
@@ -232,6 +345,8 @@ export class DashboardService {
           totalBase: toNumber(totalPendingIou),
           count: openIous.length,
           oldestDays,
+          floatLimitBase: toNumber(floatLimitBase),
+          floatBalanceBase: toNumber(floatBalanceBase),
         },
         approvalQueue: {
           pendingCount: pendingApprovals.length,
@@ -243,17 +358,21 @@ export class DashboardService {
           shortages: openVariances.length,
           missingSlips: rejectedDeposits,
           statusText:
-            totalExceptions > 0 ? 'Requires Operational Resolution' : 'No Active Exceptions',
+            totalExceptions > 0 ? 'Action Required' : 'No Active Exceptions',
         },
       },
       outletStatusRows: outletReadiness,
+      recentActivities,
       counts: {
-        cashDeposits: deposits.length,
+        cashDeposits: activeCashDeposits.length,
         pettyCash: pettyRequests.length,
         salesReconciliations: recons.length,
         approvals: pendingApprovals.length,
         screens: screensCount,
         numberSeries: seriesCount,
+        notificationTemplates: notifCount,
+        printTemplates: printCount,
+        masterCatalogs: 25,
       },
     };
   }

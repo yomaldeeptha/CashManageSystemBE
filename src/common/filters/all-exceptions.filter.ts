@@ -50,6 +50,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         }
       }
     } else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      this.logger.warn(`Prisma error ${exception.code}: ${exception.message}`);
       if (exception.code === 'P2002') {
         status = HttpStatus.CONFLICT;
         const target = Array.isArray(exception.meta?.target)
@@ -59,15 +60,28 @@ export class AllExceptionsFilter implements ExceptionFilter {
         errors = [{ field: target, message }];
       } else if (exception.code === 'P2003') {
         status = HttpStatus.CONFLICT;
-        message = 'Operation violates a relational foreign key reference.';
+        const fieldName = exception.meta?.field_name ? String(exception.meta.field_name) : '';
+        message = fieldName
+          ? `Operation violates relational reference (${fieldName}). Record may be in use or reference an invalid parent.`
+          : 'Operation violates a relational foreign key reference.';
       } else if (exception.code === 'P2025') {
         status = HttpStatus.NOT_FOUND;
         message = 'Requested record was not found.';
+      } else if (exception.code === 'P2024') {
+        status = HttpStatus.SERVICE_UNAVAILABLE;
+        message = 'Database connection pool is temporarily busy. Please try again.';
+      } else if (exception.code === 'P2034') {
+        status = HttpStatus.CONFLICT;
+        message = 'Concurrent update conflict detected. Please refresh and try again.';
+      } else if (exception.code === 'P2000') {
+        status = HttpStatus.BAD_REQUEST;
+        message = 'One or more field values exceed the maximum allowed length.';
       } else {
         status = HttpStatus.BAD_REQUEST;
         message = 'Database request could not be processed.';
       }
     } else if (exception instanceof Prisma.PrismaClientValidationError) {
+      this.logger.warn(`Prisma validation error: ${exception.message}`);
       status = HttpStatus.BAD_REQUEST;
       message = 'Invalid data format submitted to database layer.';
     } else {

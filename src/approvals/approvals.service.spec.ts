@@ -52,6 +52,7 @@ describe('ApprovalsService (Multi-Stage Maker-Checker Engine)', () => {
     const tx = {
       approvalDecision: { create: jest.fn() },
       approvalInstance: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         update: jest.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
           id: 10,
           ...data,
