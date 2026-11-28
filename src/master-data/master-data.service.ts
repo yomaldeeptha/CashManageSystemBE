@@ -47,6 +47,7 @@ const CATALOG_TABLE_NAMES: Record<string, string> = {
   paymentTerminal: 'PaymentTerminal',
   approvalWorkflow: 'ApprovalWorkflowMaster',
   formMaster: 'FormMaster',
+  screenMaster: 'Screen',
 };
 
 @Injectable()
@@ -84,6 +85,7 @@ export class MasterDataService {
       paymentTerminal: tx.paymentTerminal,
       approvalWorkflow: tx.approvalWorkflowMaster,
       formMaster: tx.formMaster,
+      screenMaster: tx.screen,
     };
     return (map[catalog] as CrudDelegate) || null;
   }
@@ -606,6 +608,23 @@ export class MasterDataService {
         break;
       }
 
+      case 'screenMaster':
+      case 'screens': {
+        const list = await this.prisma.screen.findMany({ orderBy: { id: 'asc' } });
+        rows = list.map((s) => ({
+          id: s.id,
+          screenId: s.screenId,
+          screenName: s.screenName,
+          formId: s.formId,
+          category: s.category,
+          routeKey: s.routeKey,
+          makerCheckerType: s.makerCheckerType,
+          status: s.isActive ? 'Active' : 'Inactive',
+          description: s.description || '',
+        }));
+        break;
+      }
+
       default:
         throw new BadRequestException(`Unknown master data catalog "${catalog}".`);
     }
@@ -646,6 +665,7 @@ export class MasterDataService {
       'approvalWorkflow',
       'userScreenAccess',
       'formMaster',
+      'screenMaster',
     ];
 
     // Batch catalog queries in small chunks to prevent DB connection pool saturation
@@ -1030,6 +1050,48 @@ export class MasterDataService {
             },
           });
           break;
+        case 'screenMaster': {
+          const screenId = this.str(payload.screenId).toUpperCase();
+          const screenName = this.str(payload.screenName);
+          if (!screenId || !screenName) {
+            throw new BadRequestException('Screen ID and Screen Name are required.');
+          }
+          const formId = (this.str(payload.formId) || screenId.replace(/^SCR-/, 'FRM-')).toUpperCase();
+          const existingForm = await tx.formMaster.findUnique({ where: { formId } });
+          if (!existingForm) {
+            await tx.formMaster.create({
+              data: {
+                formId,
+                formName: screenName,
+                category: this.str(payload.category, 'Operations'),
+                module: this.str(payload.category, 'Operations'),
+                screenId,
+                routeKey: this.str(payload.routeKey, 'dashboard'),
+                defaultPrefix: `${formId.replace(/^FRM-/, '').slice(0, 6)}-`,
+                defaultNumDigits: 4,
+                isTransactional: true,
+                makerCheckerType: this.str(payload.makerCheckerType, 'Standard'),
+                description: this.str(payload.description) || null,
+                isActive,
+                ...auditStamp,
+              },
+            });
+          }
+          created = await tx.screen.create({
+            data: {
+              screenId,
+              screenName,
+              formId,
+              category: this.str(payload.category, 'Operations'),
+              routeKey: this.str(payload.routeKey, 'dashboard'),
+              makerCheckerType: this.str(payload.makerCheckerType, 'Standard'),
+              description: this.str(payload.description) || null,
+              isActive,
+              ...auditStamp,
+            },
+          });
+          break;
+        }
         default:
           throw new BadRequestException(`Create not supported for catalog "${catalog}".`);
       }
@@ -1524,6 +1586,24 @@ export class MasterDataService {
               ...(payload.defaultNumDigits !== undefined
                 ? { defaultNumDigits: this.num(payload.defaultNumDigits) }
                 : {}),
+              ...(payload.makerCheckerType !== undefined
+                ? { makerCheckerType: this.str(payload.makerCheckerType) }
+                : {}),
+              ...(payload.description !== undefined
+                ? { description: this.str(payload.description) }
+                : {}),
+              isActive,
+              ...updateStamp,
+            },
+          });
+          break;
+        case 'screenMaster':
+          updatedRecord = await tx.screen.update({
+            where: { id },
+            data: {
+              ...(payload.screenName !== undefined ? { screenName: this.str(payload.screenName) } : {}),
+              ...(payload.category !== undefined ? { category: this.str(payload.category) } : {}),
+              ...(payload.routeKey !== undefined ? { routeKey: this.str(payload.routeKey) } : {}),
               ...(payload.makerCheckerType !== undefined
                 ? { makerCheckerType: this.str(payload.makerCheckerType) }
                 : {}),
