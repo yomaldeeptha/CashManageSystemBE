@@ -36,6 +36,8 @@ import {
   CreateCollectionReceiptDto,
   CreateMainCashierSettlementDto,
   CreateOutletBankDepositDto,
+  CreatePayoutReimbursementDto,
+  ExecuteDepositControlReconciliationDto,
   ImportBankStatementDto,
 } from './dto/cash-deposit.dto';
 import { ApprovalDecisionDto } from '../approvals/dto/approvals.dto';
@@ -59,6 +61,272 @@ export class CashDepositService {
       throw new BadRequestException(`Currency "${code}" is not registered in Currency Master.`);
     }
     return cur;
+  }
+
+  /**
+   * Resolves company/branch/outlet safely when Outlet or Branch fields are hidden on the UI.
+   */
+  private async resolveScopeWithFallback(
+    user: AuthenticatedUser,
+    input: { companyId: number; branchId?: number; outletId?: number },
+  ) {
+    let resolvedBranchId = input.branchId;
+    let resolvedOutletId = input.outletId;
+
+    if (!resolvedOutletId) {
+      const outletWhere: Prisma.OutletWhereInput = {
+        isActive: true,
+        branch: { companyId: input.companyId },
+      };
+      if (resolvedBranchId) {
+        outletWhere.branchId = resolvedBranchId;
+      }
+      const firstOutlet = await this.prisma.outlet.findFirst({
+        where: outletWhere,
+        orderBy: { id: 'asc' },
+      });
+      if (firstOutlet) {
+        resolvedOutletId = firstOutlet.id;
+        resolvedBranchId = resolvedBranchId || firstOutlet.branchId;
+      }
+    }
+
+    if (!resolvedBranchId) {
+      const firstBranch = await this.prisma.branch.findFirst({
+        where: { companyId: input.companyId },
+        orderBy: { id: 'asc' },
+      });
+      if (firstBranch) resolvedBranchId = firstBranch.id;
+    }
+
+    const scope = await assertEntityScope(this.prisma, user, {
+      companyId: input.companyId,
+      branchId: resolvedBranchId,
+      outletId: resolvedOutletId,
+    });
+
+    return {
+      companyId: scope.companyId,
+      branchId: scope.branchId,
+      outletId: scope.outletId || resolvedOutletId || 1,
+    };
+  }
+
+  // ============================================================================
+  // PROCESS 1 HELPERS: PENDING SECURITY ENVELOPES & LIVE BALANCE IN HAND
+  // ============================================================================
+
+  async listPendingEnvelopes(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const where: Prisma.SalesReconciliationWhereInput = {
+      linkedCashDepositId: null,
+      status: { notIn: ['Cancelled', 'Reversed'] },
+    };
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true },
+    );
+
+    const recons = await this.prisma.salesReconciliation.findMany({
+      where,
+      include: {
+        company: true,
+        branch: true,
+        outlet: true,
+        cashier: true,
+        shift: true,
+        lines: { include: { currency: true, paymentType: true } },
+      },
+      orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+      take: 100,
+    });
+
+    const baseInfo = await this.fxResolver.getSystemBaseCurrency();
+    const localCur = await this.prisma.currency.findUnique({ where: { code: 'MVR' } });
+    const usdToLocalRate = localCur && toNumber(localCur.rateToBase, 6) > 0
+      ? new Decimal(1).div(toDecimal(localCur.rateToBase))
+      : new Decimal(15.42);
+
+    const envelopes = recons.map((r) => {
+      const cashLines = r.lines.filter((l) =>
+        String(l.paymentTypeName || l.paymentType?.name || '').toLowerCase().includes('cash'),
+      );
+      const effectiveLines = cashLines.length > 0 ? cashLines : r.lines;
+
+      const byCurrency = new Map<
+        string,
+        { currency: string; submittedAmount: Decimal; exRate: Decimal; baseAmount: Decimal }
+      >();
+
+      for (const line of effectiveLines) {
+        const code = line.currency?.code || r.baseCurrencyCode || baseInfo.code;
+        const amt = toDecimal(line.amount);
+        const rate = toDecimal(line.exRate || 1);
+        const baseAmt = toDecimal(line.baseAmount || amt.times(rate));
+        const cur = byCurrency.get(code);
+        if (cur) {
+          cur.submittedAmount = cur.submittedAmount.plus(amt);
+          cur.baseAmount = cur.baseAmount.plus(baseAmt);
+        } else {
+          byCurrency.set(code, {
+            currency: code,
+            submittedAmount: amt,
+            exRate: rate,
+            baseAmount: baseAmt,
+          });
+        }
+      }
+
+      if (byCurrency.size === 0) {
+        const fallbackAmt = toDecimal(r.totalCollectionBase || r.netSales || 0);
+        byCurrency.set(r.baseCurrencyCode || baseInfo.code, {
+          currency: r.baseCurrencyCode || baseInfo.code,
+          submittedAmount: fallbackAmt,
+          exRate: new Decimal(1),
+          baseAmount: fallbackAmt,
+        });
+      }
+
+      const currencies = Array.from(byCurrency.values()).map((c) => ({
+        currency: c.currency,
+        submittedAmount: toNumber(c.submittedAmount),
+        exRate: toNumber(c.exRate, 6),
+        baseAmount: toNumber(c.baseAmount),
+      }));
+
+      const totalSubmittedBase = currencies.reduce((s, c) => s + c.baseAmount, 0);
+
+      // Compute suggested default denomination breakdown per currency for quick verification
+      const denomSteps: Record<string, number[]> = {
+        USD: [100, 50, 20, 10, 5, 1],
+        EUR: [100, 50, 20, 10, 5],
+        MVR: [1000, 500, 100, 50, 20, 10, 5],
+      };
+      const denominations: Record<string, Record<string, number>> = {};
+      for (const c of currencies) {
+        const steps = denomSteps[c.currency] || [100, 50, 20, 10, 5, 1];
+        let rem = Math.floor(c.submittedAmount);
+        const counts: Record<string, number> = {};
+        for (const d of steps) {
+          if (rem >= d) {
+            counts[String(d)] = Math.floor(rem / d);
+            rem = rem % d;
+          }
+        }
+        denominations[c.currency] = counts;
+      }
+
+      return {
+        envelopeNo: `ENV-${r.docNo}`,
+        sourceReconId: r.id,
+        reconDocNo: r.docNo,
+        docDate: formatIsoDate(r.docDate),
+        shiftName: r.shift?.name || r.shiftStatus || 'Day-End Closing',
+        companyId: r.companyId,
+        company: r.company.name,
+        branchId: r.branchId,
+        branch: r.branch.name,
+        outletId: r.outletId,
+        outlet: r.outlet.name,
+        submittedCashierId: r.cashierId || null,
+        submittedCashier: r.cashier?.name || r.lines[0]?.cashierName || 'Outlet Cashier',
+        submittedCashierEmpNo: r.cashier?.empNo || '',
+        totalSubmittedBase: Number(totalSubmittedBase.toFixed(2)),
+        totalSubmittedLocal: Number(new Decimal(totalSubmittedBase).times(usdToLocalRate).toFixed(2)),
+        localCurrencyCode: 'MVR',
+        baseCurrency: r.baseCurrencyCode || baseInfo.code,
+        currencies,
+        denominations,
+      };
+    });
+
+    return envelopes;
+  }
+
+  async getBalanceInHand(
+    user: AuthenticatedUser,
+    query?: { currency?: string; companyId?: number; floatAccountId?: number; cashierLevel?: string },
+  ) {
+    const requestedCurrency = (query?.currency || 'USD').trim().toUpperCase();
+    const cur = await this.prisma.currency.findUnique({ where: { code: requestedCurrency } });
+    const floats = await this.prisma.floatAccount.findMany({
+      where: { isActive: true },
+      include: { currency: true },
+    });
+
+    const isMain = String(query?.cashierLevel || '').toLowerCase().includes('main');
+
+    // Currency-wise available balance in hand
+    let matchingFloats = floats.filter((f) => f.currency.code.toUpperCase() === requestedCurrency);
+    if (query?.floatAccountId) {
+      const exact = floats.find((f) => f.id === query.floatAccountId);
+      if (exact && exact.currency.code.toUpperCase() === requestedCurrency) {
+        matchingFloats = [exact];
+      }
+    } else if (matchingFloats.length > 1) {
+      const levelFiltered = matchingFloats.filter((f) => {
+        const name = f.name.toLowerCase();
+        return isMain ? name.includes('main') || name.includes('central') || name.includes('treasury') : !name.includes('central');
+      });
+      if (levelFiltered.length > 0) matchingFloats = levelFiltered;
+    }
+
+    let balanceInCurrency = matchingFloats.reduce(
+      (sum, f) => sum.plus(toDecimal(f.currentBalance)),
+      new Decimal(0),
+    );
+
+    // If no float account exists for this currency, compute net cash collections minus payments in this currency
+    if (matchingFloats.length === 0 && cur) {
+      const [colAgg, payAgg, mainPayAgg] = await Promise.all([
+        this.prisma.cashDepositCurrency.aggregate({
+          where: {
+            currencyId: cur.id,
+            cashDeposit: { status: { in: ['Approved', 'Submitted', 'Posted'] } },
+          },
+          _sum: { amount: true },
+        }),
+        this.prisma.cashierPayment.aggregate({
+          where: { currencyId: cur.id, approvalStatus: { notIn: ['Rejected', 'Cancelled'] } },
+          _sum: { amount: true },
+        }),
+        this.prisma.mainCashierPayment.aggregate({
+          where: { currencyId: cur.id, approvalStatus: { notIn: ['Rejected', 'Cancelled'] } },
+          _sum: { amount: true },
+        }),
+      ]);
+      balanceInCurrency = toDecimal(colAgg._sum.amount ?? 0)
+        .minus(toDecimal(payAgg._sum.amount ?? 0))
+        .minus(toDecimal(mainPayAgg._sum.amount ?? 0));
+      if (balanceInCurrency.lt(0)) balanceInCurrency = new Decimal(0);
+    }
+
+    // Total across all float accounts converted to Base (USD) and Local (MVR)
+    let totalBaseUSD = new Decimal(0);
+    for (const f of floats) {
+      const { baseAmount } = await this.fxResolver.convertToBase(toDecimal(f.currentBalance), f.currency.code);
+      totalBaseUSD = totalBaseUSD.plus(baseAmount);
+    }
+
+    const mvrCur = await this.prisma.currency.findUnique({ where: { code: 'MVR' } });
+    const usdToMvr = mvrCur && toNumber(mvrCur.rateToBase, 6) > 0
+      ? new Decimal(1).div(toDecimal(mvrCur.rateToBase))
+      : new Decimal(15.42);
+    const totalLocalMVR = roundMoney(totalBaseUSD.times(usdToMvr));
+
+    return {
+      currency: requestedCurrency,
+      balanceInHand: toNumber(roundMoney(balanceInCurrency)),
+      totalBalanceBaseUSD: toNumber(roundMoney(totalBaseUSD)),
+      localCurrencyCode: 'MVR',
+      totalBalanceLocalMVR: toNumber(totalLocalMVR),
+      usdToLocalRate: toNumber(usdToMvr, 6),
+    };
   }
 
   // ============================================================================
@@ -126,16 +394,24 @@ export class CashDepositService {
       paymentTypeId: d.paymentTypeId,
       collectionType: d.paymentType.name,
       envelopeNo: d.envelopeNo,
+      collectionMode: d.collectionMode || 'envelope',
+      sourceReconId: d.sourceReconId || null,
       receiveFrom: d.receiveFrom || '',
       baseCurrency: d.baseCurrencyCode,
+      totalSubmittedBase: toNumber(d.totalSubmittedBase),
       totalBaseUSD: toNumber(d.totalBaseAmount),
       totalBaseAmount: toNumber(d.totalBaseAmount),
+      totalDifferenceBase: toNumber(d.totalDifferenceBase),
+      differenceNarration: d.differenceNarration || '',
+      isReconciled: d.isReconciled || false,
       status: d.status,
       remark: d.remark || '',
       currencies: d.currencies.map((c) => ({
         id: c.id,
         currency: c.currency.code,
+        submittedAmount: toNumber(c.submittedAmount),
         amount: toNumber(c.amount),
+        difference: toNumber(c.difference),
         exRate: toNumber(c.exRate, 6),
         baseAmount: toNumber(c.baseAmount),
       })),
@@ -307,31 +583,72 @@ export class CashDepositService {
     const resolvedLines: Array<{
       currencyId: number;
       currencyCode: string;
+      submittedAmount: Decimal;
       amount: Decimal;
+      difference: Decimal;
       rate: Decimal;
       baseAmount: Decimal;
+      submittedBaseAmount: Decimal;
     }> = [];
 
     let totalBase = new Decimal(0);
+    let totalSubmittedBase = new Decimal(0);
+    let hasRowDifference = false;
+    const isEnvelopeMode = (dto.collectionMode || 'envelope') === 'envelope';
+
     for (const line of dto.currencies) {
       const cur = await this.getCurrencyByCode(line.currency);
       const amount = toDecimal(line.amount);
-      if (amount.lt(0)) {
+      const submittedAmount =
+        line.submittedAmount !== undefined
+          ? toDecimal(line.submittedAmount)
+          : isEnvelopeMode
+            ? amount
+            : new Decimal(0);
+      if (amount.lt(0) || submittedAmount.lt(0)) {
         throw new BadRequestException(`Amount for ${cur.code} cannot be negative.`);
       }
+      // Difference = Submitted Amount - Receipt Amount (per Process 1 spec)
+      const difference = isEnvelopeMode ? roundMoney(submittedAmount.minus(amount)) : new Decimal(0);
+      if (difference.abs().gt(0.009)) {
+        hasRowDifference = true;
+      }
       const { rate, baseAmount } = await this.fxResolver.convertToBase(amount, cur.code);
+      const submittedBaseAmount = roundMoney(submittedAmount.times(rate));
       totalBase = totalBase.plus(baseAmount);
+      totalSubmittedBase = totalSubmittedBase.plus(submittedBaseAmount);
       resolvedLines.push({
         currencyId: cur.id,
         currencyCode: cur.code,
+        submittedAmount,
         amount,
+        difference,
         rate,
         baseAmount,
+        submittedBaseAmount,
       });
     }
 
     if (totalBase.lte(0)) {
       throw new BadRequestException('Cash Deposit total amount must be greater than zero.');
+    }
+
+    const totalDifferenceBase = isEnvelopeMode
+      ? roundMoney(totalSubmittedBase.minus(totalBase))
+      : new Decimal(0);
+    const hasDifference = hasRowDifference || totalDifferenceBase.abs().gt(0.009);
+
+    if (hasDifference) {
+      if (!dto.differenceNarration || !dto.differenceNarration.trim()) {
+        throw new BadRequestException(
+          'Difference Narration is mandatory when there is a difference between Submitted Amount and Receipt Amount.',
+        );
+      }
+      if (dto.status === 'Handover Verified') {
+        throw new BadRequestException(
+          'Transactions with a difference cannot be saved directly. Save as Draft or Submit for review and approval.',
+        );
+      }
     }
 
     // Prevent client-side status spoofing; newly created deposits may only be Draft or Submitted
@@ -360,9 +677,14 @@ export class CashDepositService {
           cashCollectorId: collector.id,
           paymentTypeId: paymentType.id,
           envelopeNo: dto.envelopeNo.trim(),
+          collectionMode: dto.collectionMode || 'envelope',
+          sourceReconId: dto.sourceReconId || null,
           receiveFrom: dto.receiveFrom || `${cashier.name} (${cashier.empNo})`,
           baseCurrencyCode: baseInfo.code,
+          totalSubmittedBase: toPrismaDecimal(totalSubmittedBase),
           totalBaseAmount: toPrismaDecimal(totalBase),
+          totalDifferenceBase: toPrismaDecimal(totalDifferenceBase),
+          differenceNarration: dto.differenceNarration?.trim() || null,
           status,
           remark: dto.remark || '',
           createdById: user.id,
@@ -376,13 +698,22 @@ export class CashDepositService {
         data: resolvedLines.map((l) => ({
           cashDepositId: dep.id,
           currencyId: l.currencyId,
+          submittedAmount: toPrismaDecimal(l.submittedAmount),
           amount: toPrismaDecimal(l.amount),
+          difference: toPrismaDecimal(l.difference),
           exRate: toPrismaRate(l.rate),
           baseAmount: toPrismaDecimal(l.baseAmount),
           createUserId: user.id,
           updateUserId: user.id,
         })),
       });
+
+      if (dto.sourceReconId) {
+        await tx.salesReconciliation.updateMany({
+          where: { id: dto.sourceReconId, linkedCashDepositId: null },
+          data: { linkedCashDepositId: dep.id, updateUserId: user.id },
+        });
+      }
 
       if (dto.denominations) {
         const denomRows: Prisma.CashDepositDenominationCreateManyInput[] = [];
@@ -676,8 +1007,78 @@ export class CashDepositService {
   }
 
   // ============================================================================
-  // TAB 2: CASHIER PAYMENT / SPENDING VOUCHER (SCREEN 02)
+  // TAB 2: CASHIER PAYMENT / SPENDING VOUCHER (CONSOLIDATED ASSISTANT & MAIN)
   // ============================================================================
+
+  async listConsolidatedPayments(
+    user: AuthenticatedUser,
+    query?: {
+      companyId?: number;
+      outletId?: string;
+      cashierLevel?: string;
+      pendingOnly?: boolean;
+      status?: string;
+      type?: string;
+      search?: string;
+    },
+  ) {
+    const [assistantList, mainList] = await Promise.all([
+      this.listCashierPayments(user, {
+        companyId: query?.companyId,
+        outletId: query?.outletId,
+        status: query?.status,
+        type: query?.type,
+        search: query?.search,
+      }),
+      this.listMainCashierPayments(user, {
+        companyId: query?.companyId,
+        outletId: query?.outletId,
+        search: query?.search,
+      }),
+    ]);
+
+    let merged = [
+      ...assistantList.map((p) => ({
+        ...p,
+        sourceTable: 'cashier_payment' as const,
+        cashierLevel: p.cashierLevel || 'Assistant Cashier',
+      })),
+      ...mainList.map((p) => ({
+        ...p,
+        sourceTable: 'main_cashier_payment' as const,
+        cashierLevel: p.cashierLevel || 'Main Cashier',
+      })),
+    ];
+
+    if (query?.cashierLevel && query.cashierLevel !== 'all') {
+      const targetLevel = query.cashierLevel.toLowerCase();
+      merged = merged.filter((p) => String(p.cashierLevel || '').toLowerCase() === targetLevel);
+    }
+    if (query?.type && query.type !== 'all') {
+      const targetType = query.type.toLowerCase();
+      merged = merged.filter((p) => String(p.cashAdvanceType || '').toLowerCase() === targetType);
+    }
+    if (query?.status && query.status !== 'all') {
+      const targetStatus = query.status.toLowerCase();
+      merged = merged.filter((p) => String(p.approvalStatus || '').toLowerCase() === targetStatus);
+    }
+    if (query?.pendingOnly) {
+      merged = merged.filter(
+        (p) =>
+          !p.isReimbursed &&
+          ['draft', 'submitted', 'pending', 'in review'].includes(String(p.approvalStatus || '').toLowerCase()),
+      );
+    }
+
+    merged.sort((a, b) => {
+      const da = String(a.paymentDate || a.docDate || '');
+      const db = String(b.paymentDate || b.docDate || '');
+      if (db !== da) return db.localeCompare(da);
+      return Number(b.id) - Number(a.id);
+    });
+
+    return merged;
+  }
 
   async listCashierPayments(
     user: AuthenticatedUser,
@@ -714,6 +1115,7 @@ export class CashDepositService {
 
     return rows.map((p) => ({
       id: p.id,
+      sourceTable: 'cashier_payment' as const,
       docNo: p.docNo,
       docDate: formatIsoDate(p.docDate),
       paymentVoucherNo: p.paymentVoucherNo,
@@ -724,6 +1126,11 @@ export class CashDepositService {
       branch: p.branch.name,
       outletId: p.outletId,
       outlet: p.outlet.name,
+      cashierLevel: p.cashierLevel || 'Assistant Cashier',
+      payeeType: p.payeeType || 'Vendor',
+      payeeEmployeeId: p.payeeEmployeeId || null,
+      isReimbursed: p.isReimbursed || false,
+      reimbursedAmount: toNumber(p.reimbursedAmount),
       cashier: p.cashierName,
       requester: p.requesterName,
       vendor: p.vendorName,
@@ -735,6 +1142,7 @@ export class CashDepositService {
       baseCurrency: p.baseCurrencyCode,
       baseAmount: toNumber(p.baseAmount),
       totalBalanceInHand: toNumber(p.totalBalanceInHand),
+      balanceCurrency: p.currency.code,
       receiptNumber: p.receiptNumber || '',
       narration: p.narration || '',
       denominations: p.denominations || {},
@@ -744,7 +1152,7 @@ export class CashDepositService {
   }
 
   async createCashierPayment(user: AuthenticatedUser, dto: CreateCashierPaymentDto) {
-    const scope = await assertEntityScope(this.prisma, user, {
+    const scope = await this.resolveScopeWithFallback(user, {
       companyId: dto.companyId,
       branchId: dto.branchId,
       outletId: dto.outletId,
@@ -753,19 +1161,23 @@ export class CashDepositService {
     const { baseCurrency, baseAmount } = await this.fxResolver.convertToBase(dto.amount, cur.code);
 
     const created = await this.prisma.$transaction(async (tx) => {
-      const floatAcc = dto.floatAccountId
+      let floatAcc = dto.floatAccountId
         ? await tx.floatAccount.findUnique({ where: { id: dto.floatAccountId } })
         : dto.floatAccount
           ? await tx.floatAccount.findFirst({ where: { name: { equals: dto.floatAccount, mode: 'insensitive' } } })
           : null;
 
+      // If selected float account currency differs, find an active float account matching transaction currency
+      if (floatAcc && floatAcc.currencyId !== cur.id) {
+        const currencyFloat = await tx.floatAccount.findFirst({
+          where: { currencyId: cur.id, isActive: true },
+          orderBy: { id: 'asc' },
+        });
+        floatAcc = currencyFloat;
+      }
+
       let balanceAfter = new Decimal(0);
       if (floatAcc) {
-        if (floatAcc.currencyId !== cur.id) {
-          throw new BadRequestException(
-            `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
-          );
-        }
         const deductAmt = toPrismaDecimal(dto.amount);
         const debited = await tx.floatAccount.updateMany({
           where: { id: floatAcc.id, currentBalance: { gte: deductAmt } },
@@ -807,6 +1219,10 @@ export class CashDepositService {
           ? dto.paymentVoucherNo
           : `PV-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 
+      const resolvedPayeeType =
+        dto.payeeType ||
+        (String(dto.cashAdvanceType || '').toLowerCase().includes('employee') ? 'Employee' : 'Vendor');
+
       const payment = await tx.cashierPayment.create({
         data: {
           docNo,
@@ -815,17 +1231,20 @@ export class CashDepositService {
           paymentDate: parseDateOnly(dto.paymentDate || dto.docDate),
           companyId: scope.companyId,
           branchId: scope.branchId,
-          outletId: scope.outletId!,
+          outletId: scope.outletId,
+          cashierLevel: dto.cashierLevel || 'Assistant Cashier',
+          payeeType: resolvedPayeeType,
+          payeeEmployeeId: dto.payeeEmployeeId || null,
           cashierId: dto.cashierId || user.employeeId || null,
           cashierName: dto.cashierName || user.fullName,
           requesterId: dto.requesterId || null,
           requesterName: dto.requester || user.fullName,
-          vendorId: dto.vendorId || null,
+          vendorId: resolvedPayeeType === 'Vendor' ? dto.vendorId || null : null,
           vendorName: dto.vendor,
           departmentId: dto.departmentId || null,
           departmentName: dto.department || 'Operations',
           floatAccountId: floatAcc?.id || null,
-          floatAccountName: floatAcc?.name || dto.floatAccount || 'Outlet Float',
+          floatAccountName: floatAcc?.name || dto.floatAccount || 'Primary Float',
           currencyId: cur.id,
           cashAdvanceType: dto.cashAdvanceType,
           amount: toPrismaDecimal(dto.amount),
@@ -930,6 +1349,7 @@ export class CashDepositService {
         branch: true,
         outlet: true,
         lines: { include: { currency: true } },
+        receipts: { select: { id: true, docNo: true } },
       },
       orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
     });
@@ -979,6 +1399,10 @@ export class CashDepositService {
         transferAmount: toNumber(s.totalTransferBase),
         settlementAmount: toNumber(s.totalTransferBase),
         baseCurrency: s.baseCurrencyCode,
+        localCurrencyCode: s.localCurrencyCode || 'MVR',
+        currentBalanceLocal: toNumber(s.currentBalanceLocal),
+        transferToValueLocal: toNumber(s.transferToValueLocal),
+        hasReceipt: Array.isArray(s.receipts) && s.receipts.length > 0,
         denominationSummary: denomSummary || 'Verified Denominations',
         daysPending,
         narration: s.narration || '',
@@ -1004,7 +1428,7 @@ export class CashDepositService {
   }
 
   async createSettlement(user: AuthenticatedUser, dto: CreateCashierSettlementDto) {
-    const scope = await assertEntityScope(this.prisma, user, {
+    const scope = await this.resolveScopeWithFallback(user, {
       companyId: dto.companyId,
       branchId: dto.branchId,
       outletId: dto.outletId,
@@ -1076,15 +1500,25 @@ export class CashDepositService {
           toDate,
           companyId: scope.companyId,
           branchId: scope.branchId,
-          outletId: scope.outletId!,
+          outletId: scope.outletId,
+          fromCashierId: dto.fromCashierId || user.employeeId || null,
           fromCashierName: dto.fromCashier,
+          toCashierId: dto.toCashierId || null,
           toCashierName: dto.toCashier,
           floatAccountId: dto.floatAccountId || null,
-          floatAccountName: dto.floatAccountName || 'Outlet Primary Float',
+          floatAccountName: dto.floatAccountName || 'Primary Float',
           baseCurrencyCode: baseInfo.code,
+          localCurrencyCode: dto.localCurrencyCode || 'MVR',
+          currentBalanceLocal: toPrismaDecimal(dto.currentBalanceLocal ?? 0),
+          transferToValueLocal: toPrismaDecimal(dto.transferToValueLocal ?? 0),
           totalTransferBase: toPrismaDecimal(totalTransferBase),
           narration: dto.narration || '',
-          status: dto.status || 'Pending Acceptance',
+          status:
+            dto.status === 'Draft'
+              ? 'Draft'
+              : dto.status === 'Submitted' || dto.status === 'Finalized'
+                ? 'Submitted'
+                : dto.status || 'Pending Acceptance',
           createdById: user.id,
           createUserId: user.id,
           updateUserId: user.id,
@@ -1262,7 +1696,7 @@ export class CashDepositService {
   }
 
   async createReceipt(user: AuthenticatedUser, dto: CreateCollectionReceiptDto) {
-    const scope = await assertEntityScope(this.prisma, user, {
+    const scope = await this.resolveScopeWithFallback(user, {
       companyId: dto.companyId,
       branchId: dto.branchId,
       outletId: dto.outletId,
@@ -1329,8 +1763,8 @@ export class CashDepositService {
           receiptType: dto.receiptType || 'Main Cash Collection',
           collectionAccount: dto.collectionAccount || 'Outlet Cash Control Clearing A/C',
           bankAccountId: dto.bankAccountId || null,
-          bankAccountName: dto.bankAccount,
-          cashAccountName: dto.cashAccount,
+          bankAccountName: dto.bankAccount || 'Deposit Control Account',
+          cashAccountName: dto.cashAccount || 'Central Vault Physical Cash',
           baseCurrencyCode: baseInfo.code,
           settlementBaseAmt: toPrismaDecimal(totalSettleBase),
           receiptBaseAmt: toPrismaDecimal(totalReceiptBase),
@@ -1396,7 +1830,10 @@ export class CashDepositService {
   // TAB 6 (SCREEN 07): MAIN CASHIER PAYMENT
   // ============================================================================
 
-  async listMainCashierPayments(user: AuthenticatedUser, query?: { companyId?: number; outletId?: string; search?: string }) {
+  async listMainCashierPayments(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; pendingOnly?: boolean; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.MainCashierPaymentWhereInput = {};
     applyEntityScopeToWhere(
@@ -1405,6 +1842,10 @@ export class CashDepositService {
       { companyId: query?.companyId, outletId: query?.outletId },
       { includeOutlet: true },
     );
+    if (query?.pendingOnly) {
+      where.isReimbursed = false;
+      where.approvalStatus = { in: ['Draft', 'Submitted', 'Pending', 'In Review'] };
+    }
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1421,6 +1862,7 @@ export class CashDepositService {
 
     return rows.map((p) => ({
       id: p.id,
+      sourceTable: 'main_cashier_payment' as const,
       docNo: p.docNo,
       docDate: formatIsoDate(p.docDate),
       paymentVoucherNo: p.paymentVoucherNo,
@@ -1431,6 +1873,11 @@ export class CashDepositService {
       branch: p.branch.name,
       outletId: p.outletId,
       outlet: p.outlet.name,
+      cashierLevel: p.cashierLevel || 'Main Cashier',
+      payeeType: p.payeeType || 'Vendor',
+      payeeEmployeeId: p.payeeEmployeeId || null,
+      isReimbursed: p.isReimbursed || false,
+      reimbursedAmount: toNumber(p.reimbursedAmount),
       transactionCurrency: p.currency.code,
       vendor: p.vendorName,
       cashAdvanceType: p.cashAdvanceType,
@@ -1455,28 +1902,34 @@ export class CashDepositService {
     dto: CreateCashierPaymentDto,
     editId?: number,
   ) {
-    const scope = await assertEntityScope(this.prisma, user, {
+    const scope = await this.resolveScopeWithFallback(user, {
       companyId: dto.companyId,
       branchId: dto.branchId,
       outletId: dto.outletId,
     });
     const cur = await this.getCurrencyByCode(dto.transactionCurrency);
     const { baseCurrency, baseAmount } = await this.fxResolver.convertToBase(dto.amount, cur.code);
+    const resolvedPayeeType =
+      dto.payeeType ||
+      (String(dto.cashAdvanceType || '').toLowerCase().includes('employee') ? 'Employee' : 'Vendor');
 
     const savedId = await this.prisma.$transaction(async (tx) => {
-      const floatAcc = dto.floatAccountId
+      let floatAcc = dto.floatAccountId
         ? await tx.floatAccount.findUnique({ where: { id: dto.floatAccountId } })
         : dto.floatAccount
           ? await tx.floatAccount.findFirst({ where: { name: { equals: dto.floatAccount, mode: 'insensitive' } } })
           : null;
 
+      if (floatAcc && floatAcc.currencyId !== cur.id) {
+        const currencyFloat = await tx.floatAccount.findFirst({
+          where: { currencyId: cur.id, isActive: true },
+          orderBy: { id: 'asc' },
+        });
+        floatAcc = currencyFloat;
+      }
+
       let balanceAfter = toDecimal(floatAcc?.currentBalance ?? 0);
       if (!editId && floatAcc) {
-        if (floatAcc.currencyId !== cur.id) {
-          throw new BadRequestException(
-            `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
-          );
-        }
         const deductAmt = toPrismaDecimal(dto.amount);
         const debited = await tx.floatAccount.updateMany({
           where: { id: floatAcc.id, currentBalance: { gte: deductAmt } },
@@ -1516,11 +1969,6 @@ export class CashDepositService {
         }
         const delta = toDecimal(dto.amount).minus(toDecimal(oldMainPay.amount));
         if (floatAcc && !delta.eq(0)) {
-          if (floatAcc.currencyId !== cur.id) {
-            throw new BadRequestException(
-              `Currency mismatch: payment currency (${cur.code}) does not match float account "${floatAcc.name}".`,
-            );
-          }
           if (delta.gt(0)) {
             const debited = await tx.floatAccount.updateMany({
               where: { id: floatAcc.id, currentBalance: { gte: toPrismaDecimal(delta) } },
@@ -1543,8 +1991,12 @@ export class CashDepositService {
             paymentDate: parseDateOnly(dto.paymentDate || dto.docDate),
             companyId: scope.companyId,
             branchId: scope.branchId,
-            outletId: scope.outletId!,
+            outletId: scope.outletId,
             currencyId: cur.id,
+            cashierLevel: dto.cashierLevel || 'Main Cashier',
+            payeeType: resolvedPayeeType,
+            payeeEmployeeId: dto.payeeEmployeeId || null,
+            vendorId: resolvedPayeeType === 'Vendor' ? dto.vendorId || null : null,
             vendorName: dto.vendor,
             cashAdvanceType: dto.cashAdvanceType,
             amount: toPrismaDecimal(dto.amount),
@@ -1553,7 +2005,8 @@ export class CashDepositService {
             departmentName: dto.department || 'Treasury Operations',
             requesterName: dto.requester || user.fullName,
             floatAccountId: floatAcc?.id || null,
-            floatAccountName: floatAcc?.name || dto.floatAccount || 'Central Vault Float',
+            floatAccountName: floatAcc?.name || dto.floatAccount || 'Main Float',
+            balanceCurrency: cur.code,
             approvalStatus: dto.approvalStatus === 'Draft' ? 'Draft' : 'Submitted',
             receiptNumber: dto.receiptNumber || null,
             narration: dto.narration || '',
@@ -1608,9 +2061,12 @@ export class CashDepositService {
           paymentDate: parseDateOnly(dto.paymentDate || dto.docDate),
           companyId: scope.companyId,
           branchId: scope.branchId,
-          outletId: scope.outletId!,
+          outletId: scope.outletId,
           currencyId: cur.id,
-          vendorId: dto.vendorId || null,
+          cashierLevel: dto.cashierLevel || 'Main Cashier',
+          payeeType: resolvedPayeeType,
+          payeeEmployeeId: dto.payeeEmployeeId || null,
+          vendorId: resolvedPayeeType === 'Vendor' ? dto.vendorId || null : null,
           vendorName: dto.vendor,
           cashAdvanceType: dto.cashAdvanceType,
           amount: toPrismaDecimal(dto.amount),
@@ -1621,7 +2077,7 @@ export class CashDepositService {
           requesterId: dto.requesterId || null,
           requesterName: dto.requester || user.fullName,
           floatAccountId: floatAcc?.id || null,
-          floatAccountName: floatAcc?.name || dto.floatAccount || 'Central Vault Float',
+          floatAccountName: floatAcc?.name || dto.floatAccount || 'Main Float',
           totalBalanceInHand: toPrismaDecimal(balanceAfter),
           balanceCurrency: cur.code,
           approvalStatus: dto.approvalStatus === 'Draft' ? 'Draft' : 'Submitted',
@@ -1669,7 +2125,10 @@ export class CashDepositService {
   // TAB 7 (SCREEN 08): MAIN CASHIER SETTLEMENT
   // ============================================================================
 
-  async listMainCashierSettlements(user: AuthenticatedUser, query?: { companyId?: number; outletId?: string; search?: string }) {
+  async listMainCashierSettlements(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; outletId?: string; status?: string; search?: string },
+  ) {
     const scope = await getEffectiveScope(this.prisma, user);
     const where: Prisma.MainCashierSettlementWhereInput = {};
     applyEntityScopeToWhere(
@@ -1678,6 +2137,9 @@ export class CashDepositService {
       { companyId: query?.companyId, outletId: query?.outletId },
       { includeOutlet: true },
     );
+    if (query?.status && query.status !== 'all') {
+      where.status = { equals: query.status, mode: 'insensitive' };
+    }
     if (query?.search) {
       where.OR = [
         { docNo: { contains: query.search, mode: 'insensitive' } },
@@ -1716,6 +2178,7 @@ export class CashDepositService {
       totalTransferBase: toNumber(s.totalTransferBase),
       narration: s.narration || '',
       status: s.status,
+      isReconciled: s.isReconciled || false,
       rows: s.lines.map((l) => ({
         id: l.id,
         currency: l.currency.code,
@@ -1736,7 +2199,7 @@ export class CashDepositService {
     dto: CreateMainCashierSettlementDto,
     editId?: number,
   ) {
-    const scope = await assertEntityScope(this.prisma, user, {
+    const scope = await this.resolveScopeWithFallback(user, {
       companyId: dto.companyId,
       branchId: dto.branchId,
       outletId: dto.outletId,
@@ -1781,6 +2244,8 @@ export class CashDepositService {
       });
     }
 
+    const finalStatus = dto.status === 'Draft' ? 'Draft' : dto.status || 'Submitted';
+
     const savedId = await this.prisma.$transaction(async (tx) => {
       let settlementId = editId;
       let docNo = dto.docNo || '';
@@ -1795,7 +2260,7 @@ export class CashDepositService {
             toDate: parseDateOnly(dto.toDate),
             companyId: scope.companyId,
             branchId: scope.branchId,
-            outletId: scope.outletId!,
+            outletId: scope.outletId,
             fromCashierName: dto.fromCashier,
             toBankAccountId: dto.toBankAccountId || null,
             toBankName: dto.toBank,
@@ -1803,7 +2268,7 @@ export class CashDepositService {
             baseCurrencyCode: baseInfo.code,
             totalTransferBase: toPrismaDecimal(totalTransferBase),
             narration: dto.narration || '',
-            status: dto.status === 'Draft' ? 'Submitted' : dto.status || 'Submitted',
+            status: finalStatus,
             updateUserId: user.id,
           },
         });
@@ -1837,7 +2302,7 @@ export class CashDepositService {
             toDate: parseDateOnly(dto.toDate),
             companyId: scope.companyId,
             branchId: scope.branchId,
-            outletId: scope.outletId!,
+            outletId: scope.outletId,
             fromCashierName: dto.fromCashier,
             toBankAccountId: dto.toBankAccountId || null,
             toBankName: dto.toBank,
@@ -1845,7 +2310,7 @@ export class CashDepositService {
             baseCurrencyCode: baseInfo.code,
             totalTransferBase: toPrismaDecimal(totalTransferBase),
             narration: dto.narration || '',
-            status: dto.status === 'Draft' ? 'Submitted' : dto.status || 'Submitted',
+            status: finalStatus,
             createdById: user.id,
             createUserId: user.id,
             updateUserId: user.id,
@@ -1884,8 +2349,8 @@ export class CashDepositService {
         entityId: settlementId!,
         docNo,
         action: editId ? 'UPDATE' : 'CREATE',
-        step: `${editId ? 'Updated' : 'Submitted'} Main Cashier Settlement ${docNo} (${baseInfo.code} ${toNumber(totalTransferBase)})`,
-        toStatus: 'Submitted',
+        step: `${editId ? 'Updated' : finalStatus === 'Draft' ? 'Saved Draft' : 'Submitted'} Main Cashier Settlement ${docNo} (${baseInfo.code} ${toNumber(totalTransferBase)})`,
+        toStatus: finalStatus,
         performedById: user.id,
         performedByName: user.fullName,
         tx,
@@ -1899,8 +2364,66 @@ export class CashDepositService {
   }
 
   // ============================================================================
-  // TAB 8 (SCREEN 06): OUTLET BANK DEPOSIT & CARRY FORWARD
+  // TAB 8 (SCREEN 06): OUTLET CASH SALES - BANK SETTLEMENT & CARRY FORWARD
   // ============================================================================
+
+  async listUnsettledCollections(
+    user: AuthenticatedUser,
+    query?: { fromDate?: string; toDate?: string; companyId?: number; outletId?: string },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const where: Prisma.CashDepositWhereInput = {
+      status: { in: ['Approved', 'Submitted'] },
+    };
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId, outletId: query?.outletId },
+      { includeBranch: true, includeOutlet: true },
+    );
+    if (query?.fromDate || query?.toDate) {
+      where.collectionDate = {};
+      if (query.fromDate) where.collectionDate.gte = parseDateOnly(query.fromDate);
+      if (query.toDate) where.collectionDate.lte = parseDateOnly(query.toDate);
+    }
+
+    const deposits = await this.prisma.cashDeposit.findMany({
+      where,
+      include: {
+        outlet: true,
+        cashier: true,
+        bankDepositItems: true,
+      },
+      orderBy: [{ collectionDate: 'asc' }, { id: 'asc' }],
+    });
+
+    return deposits
+      .map((d) => {
+        const collectionAmount = toNumber(d.totalBaseAmount);
+        const previouslySettled = d.bankDepositItems.reduce(
+          (sum, i) => sum + toNumber(i.settledAmount),
+          0,
+        );
+        const remainingBalance = Number(Math.max(0, collectionAmount - previouslySettled).toFixed(2));
+        return {
+          id: d.id,
+          cashDepositId: d.id,
+          docNo: d.docNo,
+          collectionDate: formatIsoDate(d.collectionDate),
+          outletId: d.outletId,
+          outlet: d.outlet.name,
+          cashier: d.cashier.name,
+          envelopeNo: d.envelopeNo,
+          currency: d.baseCurrencyCode || 'USD',
+          collectionAmount,
+          previouslySettled: Number(previouslySettled.toFixed(2)),
+          remainingBalance,
+          settledAmount: remainingBalance,
+          status: d.status,
+        };
+      })
+      .filter((d) => d.remainingBalance > 0.009);
+  }
 
   async listBankDeposits(
     user: AuthenticatedUser,
@@ -1970,11 +2493,23 @@ export class CashDepositService {
     const baseInfo = await this.fxResolver.getSystemBaseCurrency();
     const cur = await this.getCurrencyByCode(dto.currency || baseInfo.code);
 
+    const requestedIds =
+      dto.items && dto.items.length > 0
+        ? dto.items.map((i) => Number(i.cashDepositId))
+        : dto.cashDepositIds || [];
+
+    const settledMap = new Map<number, Decimal>();
+    if (dto.items && dto.items.length > 0) {
+      for (const item of dto.items) {
+        settledMap.set(Number(item.cashDepositId), toDecimal(item.settledAmount));
+      }
+    }
+
     const linkedDeposits =
-      dto.cashDepositIds && dto.cashDepositIds.length > 0
+      requestedIds.length > 0
         ? await this.prisma.cashDeposit.findMany({
             where: {
-              id: { in: dto.cashDepositIds },
+              id: { in: requestedIds },
               companyId: scope.companyId,
               branchId: scope.branchId,
               ...(scope.outletId ? { outletId: scope.outletId } : {}),
@@ -1982,8 +2517,8 @@ export class CashDepositService {
           })
         : [];
 
-    if (dto.cashDepositIds && dto.cashDepositIds.length > 0) {
-      if (linkedDeposits.length !== new Set(dto.cashDepositIds).size) {
+    if (requestedIds.length > 0) {
+      if (linkedDeposits.length !== new Set(requestedIds).size) {
         throw new BadRequestException(
           'One or more selected Cash Deposit slips were not found in your authorized entity scope.',
         );
@@ -1996,10 +2531,21 @@ export class CashDepositService {
       }
     }
 
-    const totalAmount =
+    const totalCollectionAmt =
       linkedDeposits.length > 0
         ? linkedDeposits.reduce((sum, d) => sum.plus(toDecimal(d.totalBaseAmount)), new Decimal(0))
         : toDecimal(dto.totalCollectionAmount ?? 0);
+
+    const totalSettledAmt =
+      linkedDeposits.length > 0
+        ? linkedDeposits.reduce((sum, d) => {
+            const manual = settledMap.get(d.id);
+            return sum.plus(manual !== undefined ? manual : toDecimal(d.totalBaseAmount));
+          }, new Decimal(0))
+        : toDecimal(dto.totalCollectionAmount ?? 0);
+
+    const totalAmount = totalSettledAmt;
+    const totalRemainingBalance = roundMoney(totalCollectionAmt.minus(totalSettledAmt));
 
     if (totalAmount.lte(0)) {
       throw new BadRequestException('Deposit total amount must be greater than 0.');
@@ -2066,9 +2612,9 @@ export class CashDepositService {
           bankAccountId: dto.bankAccountId || null,
           depositAccountName,
           processFlowDecision: dto.processFlowDecision,
-          totalCollectionAmount: toPrismaDecimal(totalAmount),
-          settledAmount: toPrismaDecimal(totalAmount),
-          balance: toPrismaDecimal(0),
+          totalCollectionAmount: toPrismaDecimal(totalCollectionAmt),
+          settledAmount: toPrismaDecimal(totalSettledAmt),
+          balance: toPrismaDecimal(totalRemainingBalance.lt(0) ? new Decimal(0) : totalRemainingBalance),
           glAccounting: glAccounting as Prisma.InputJsonValue,
           status,
           remark: dto.remark || '',
@@ -2092,34 +2638,41 @@ export class CashDepositService {
       }
 
       if (linkedDeposits.length > 0) {
+        const fullySettledIds: number[] = [];
         await tx.outletBankDepositItem.createMany({
-          data: linkedDeposits.map((ld) => ({
-            bankDepositId: bankDep.id,
-            cashDepositId: ld.id,
-            collectionDocNo: ld.docNo,
-            collectionDate: ld.collectionDate,
-            collectionAmount: ld.totalBaseAmount,
-            settledAmount: ld.totalBaseAmount,
-            balance: toPrismaDecimal(0),
-            createUserId: user.id,
-            updateUserId: user.id,
-          })),
+          data: linkedDeposits.map((ld) => {
+            const colAmt = toDecimal(ld.totalBaseAmount);
+            const setAmt = settledMap.has(ld.id) ? settledMap.get(ld.id)! : colAmt;
+            const bal = roundMoney(colAmt.minus(setAmt));
+            if (bal.lte(0.009)) fullySettledIds.push(ld.id);
+            return {
+              bankDepositId: bankDep.id,
+              cashDepositId: ld.id,
+              collectionDocNo: ld.docNo,
+              collectionDate: ld.collectionDate,
+              collectionAmount: toPrismaDecimal(colAmt),
+              settledAmount: toPrismaDecimal(setAmt),
+              balance: toPrismaDecimal(bal.lt(0) ? new Decimal(0) : bal),
+              createUserId: user.id,
+              updateUserId: user.id,
+            };
+          }),
         });
-        if (isBank) {
+        if (isBank && fullySettledIds.length > 0) {
           const postedResult = await tx.cashDeposit.updateMany({
             where: {
-              id: { in: linkedDeposits.map((d) => d.id) },
+              id: { in: fullySettledIds },
               status: 'Approved',
             },
             data: { status: 'Posted', updateUserId: user.id },
           });
-          if (postedResult.count !== linkedDeposits.length) {
+          if (postedResult.count !== fullySettledIds.length) {
             throw new BadRequestException(
               'One or more selected Cash Deposits were already posted or changed status concurrently.',
             );
           }
           if (this.changeLogService) {
-            for (const ld of linkedDeposits) {
+            for (const ld of linkedDeposits.filter((x) => fullySettledIds.includes(x.id))) {
               await this.changeLogService.logAction({
                 action: 'POST',
                 tableName: 'CashDeposit',
@@ -2127,7 +2680,7 @@ export class CashDepositService {
                 recordCode: ld.docNo,
                 oldValues: { status: ld.status },
                 newValues: { status: 'Posted' },
-                description: `Posted via Outlet Bank Deposit ${bankDep.docNo}`,
+                description: `Posted via Outlet Cash Sales - Bank Settlement ${bankDep.docNo}`,
                 actor: user,
                 tx,
               });
@@ -2308,5 +2861,695 @@ export class CashDepositService {
       varianceCount,
       items: await this.listBankReconciliations(user),
     };
+  }
+
+  // ============================================================================
+  // CASHIER PAYOUT ADVANCE — REIMBURSEMENT PROCESS
+  // ============================================================================
+
+  async listPendingPayoutsForReimbursement(
+    user: AuthenticatedUser,
+    query?: { fromDate?: string; toDate?: string; companyId?: number },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const dateFilter: Prisma.DateTimeFilter = {};
+    if (query?.fromDate) dateFilter.gte = parseDateOnly(query.fromDate);
+    if (query?.toDate) dateFilter.lte = parseDateOnly(query.toDate);
+    const hasDate = Boolean(query?.fromDate || query?.toDate);
+
+    const cpWhere: Prisma.CashierPaymentWhereInput = {
+      isReimbursed: false,
+      approvalStatus: { notIn: ['Rejected', 'Cancelled'] },
+      ...(hasDate ? { paymentDate: dateFilter } : {}),
+    };
+    const mpWhere: Prisma.MainCashierPaymentWhereInput = {
+      isReimbursed: false,
+      approvalStatus: { notIn: ['Rejected', 'Cancelled'] },
+      ...(hasDate ? { paymentDate: dateFilter } : {}),
+    };
+
+    applyEntityScopeToWhere(
+      cpWhere as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeOutlet: true },
+    );
+    applyEntityScopeToWhere(
+      mpWhere as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeOutlet: true },
+    );
+
+    const [cpRows, mpRows] = await Promise.all([
+      this.prisma.cashierPayment.findMany({
+        where: cpWhere,
+        include: { currency: true, company: true, branch: true },
+        orderBy: [{ paymentDate: 'desc' }, { id: 'desc' }],
+      }),
+      this.prisma.mainCashierPayment.findMany({
+        where: mpWhere,
+        include: { currency: true, company: true, branch: true },
+        orderBy: [{ paymentDate: 'desc' }, { id: 'desc' }],
+      }),
+    ]);
+
+    const items = [
+      ...cpRows.map((p) => ({
+        key: `cashier_payment:${p.id}`,
+        sourceTable: 'cashier_payment' as const,
+        sourcePaymentId: p.id,
+        cashierName: p.cashierName || p.requesterName,
+        cashierLevel: p.cashierLevel || 'Assistant Cashier',
+        cashierAccount: p.floatAccountName || 'Cash Control Account',
+        currencyCode: p.currency.code,
+        paymentDocNo: p.paymentVoucherNo || p.docNo,
+        docNo: p.docNo,
+        paymentDate: formatIsoDate(p.paymentDate),
+        cashAdvanceType: p.cashAdvanceType,
+        vendor: p.vendorName,
+        amount: toNumber(p.amount),
+        baseAmount: toNumber(p.baseAmount),
+        settleAmount: toNumber(p.amount),
+        remark: p.narration || '',
+        companyId: p.companyId,
+        branchId: p.branchId,
+      })),
+      ...mpRows.map((p) => ({
+        key: `main_cashier_payment:${p.id}`,
+        sourceTable: 'main_cashier_payment' as const,
+        sourcePaymentId: p.id,
+        cashierName: p.requesterName,
+        cashierLevel: p.cashierLevel || 'Main Cashier',
+        cashierAccount: p.floatAccountName || 'Main Cash Control Account',
+        currencyCode: p.currency.code,
+        paymentDocNo: p.paymentVoucherNo || p.docNo,
+        docNo: p.docNo,
+        paymentDate: formatIsoDate(p.paymentDate),
+        cashAdvanceType: p.cashAdvanceType,
+        vendor: p.vendorName,
+        amount: toNumber(p.amount),
+        baseAmount: toNumber(p.baseAmount),
+        settleAmount: toNumber(p.amount),
+        remark: p.narration || '',
+        companyId: p.companyId,
+        branchId: p.branchId,
+      })),
+    ];
+
+    items.sort((a, b) => String(b.paymentDate || '').localeCompare(String(a.paymentDate || '')));
+    return items;
+  }
+
+  async listPayoutReimbursements(
+    user: AuthenticatedUser,
+    query?: { companyId?: number; search?: string },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const where: Prisma.CashierPayoutReimbursementWhereInput = {};
+    applyEntityScopeToWhere(
+      where as Record<string, unknown>,
+      scope,
+      { companyId: query?.companyId },
+      { includeBranch: true },
+    );
+    if (query?.search) {
+      where.OR = [
+        { docNo: { contains: query.search, mode: 'insensitive' } },
+        { bankAccountName: { contains: query.search, mode: 'insensitive' } },
+        { remark: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const rows = await this.prisma.cashierPayoutReimbursement.findMany({
+      where,
+      include: { company: true, branch: true, items: true },
+      orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+    });
+
+    return rows.map((r) => ({
+      id: r.id,
+      docNo: r.docNo,
+      docDate: formatIsoDate(r.docDate),
+      fromDate: formatIsoDate(r.fromDate),
+      toDate: formatIsoDate(r.toDate),
+      companyId: r.companyId,
+      company: r.company.name,
+      branchId: r.branchId,
+      branch: r.branch.name,
+      bankAccountId: r.bankAccountId,
+      bankAccountName: r.bankAccountName,
+      baseCurrency: r.baseCurrencyCode,
+      totalAmount: toNumber(r.totalAmount),
+      totalSettledAmount: toNumber(r.totalSettledAmount),
+      status: r.status,
+      isReconciled: r.isReconciled,
+      remark: r.remark || '',
+      items: r.items.map((i) => ({
+        id: i.id,
+        sourceTable: i.sourceTable,
+        sourcePaymentId: i.sourcePaymentId,
+        cashierName: i.cashierName,
+        cashierAccount: i.cashierAccount,
+        currencyCode: i.currencyCode,
+        paymentDocNo: i.paymentDocNo,
+        paymentDate: formatIsoDate(i.paymentDate),
+        cashAdvanceType: i.cashAdvanceType,
+        amount: toNumber(i.amount),
+        settleAmount: toNumber(i.settleAmount),
+        remark: i.remark || '',
+      })),
+    }));
+  }
+
+  async createPayoutReimbursement(
+    user: AuthenticatedUser,
+    dto: CreatePayoutReimbursementDto,
+  ) {
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException('Select at least one pending Cashier Payout Advance to reimburse.');
+    }
+
+    const scope = await this.resolveScopeWithFallback(user, {
+      companyId: dto.companyId,
+      branchId: dto.branchId,
+    });
+    const baseInfo = await this.fxResolver.getSystemBaseCurrency();
+
+    const createdId = await this.prisma.$transaction(async (tx) => {
+      const preparedItems: Array<{
+        sourceTable: 'cashier_payment' | 'main_cashier_payment';
+        sourcePaymentId: number;
+        cashierName: string;
+        cashierAccount: string;
+        currencyCode: string;
+        paymentDocNo: string;
+        paymentDate: Date;
+        cashAdvanceType: string;
+        amount: Decimal;
+        settleAmount: Decimal;
+        settleBaseAmount: Decimal;
+        amountBaseAmount: Decimal;
+        floatAccountId: number | null;
+        remark: string;
+      }> = [];
+
+      let totalAmountBase = new Decimal(0);
+      let totalSettledBase = new Decimal(0);
+
+      for (const item of dto.items) {
+        if (item.sourceTable === 'cashier_payment') {
+          const p = await tx.cashierPayment.findUnique({
+            where: { id: item.sourcePaymentId },
+            include: { currency: true },
+          });
+          if (!p) {
+            throw new NotFoundException(`Cashier Payment #${item.sourcePaymentId} not found.`);
+          }
+          if (p.isReimbursed) {
+            throw new BadRequestException(
+              `Cashier Payment ${p.paymentVoucherNo} has already been reimbursed and cannot be selected again.`,
+            );
+          }
+          const settleDec = toDecimal(item.settleAmount);
+          const { baseAmount: settleBase } = await this.fxResolver.convertToBase(settleDec, p.currency.code);
+          const { baseAmount: amtBase } = await this.fxResolver.convertToBase(toDecimal(p.amount), p.currency.code);
+          totalAmountBase = totalAmountBase.plus(amtBase);
+          totalSettledBase = totalSettledBase.plus(settleBase);
+
+          preparedItems.push({
+            sourceTable: 'cashier_payment',
+            sourcePaymentId: p.id,
+            cashierName: p.cashierName || p.requesterName,
+            cashierAccount: p.floatAccountName || 'Cash Control Account',
+            currencyCode: p.currency.code,
+            paymentDocNo: p.paymentVoucherNo || p.docNo,
+            paymentDate: p.paymentDate,
+            cashAdvanceType: p.cashAdvanceType,
+            amount: toDecimal(p.amount),
+            settleAmount: settleDec,
+            settleBaseAmount: settleBase,
+            amountBaseAmount: amtBase,
+            floatAccountId: p.floatAccountId,
+            remark: item.remark || p.narration || '',
+          });
+        } else {
+          const p = await tx.mainCashierPayment.findUnique({
+            where: { id: item.sourcePaymentId },
+            include: { currency: true },
+          });
+          if (!p) {
+            throw new NotFoundException(`Main Cashier Payment #${item.sourcePaymentId} not found.`);
+          }
+          if (p.isReimbursed) {
+            throw new BadRequestException(
+              `Main Cashier Payment ${p.paymentVoucherNo} has already been reimbursed and cannot be selected again.`,
+            );
+          }
+          const settleDec = toDecimal(item.settleAmount);
+          const { baseAmount: settleBase } = await this.fxResolver.convertToBase(settleDec, p.currency.code);
+          const { baseAmount: amtBase } = await this.fxResolver.convertToBase(toDecimal(p.amount), p.currency.code);
+          totalAmountBase = totalAmountBase.plus(amtBase);
+          totalSettledBase = totalSettledBase.plus(settleBase);
+
+          preparedItems.push({
+            sourceTable: 'main_cashier_payment',
+            sourcePaymentId: p.id,
+            cashierName: p.requesterName,
+            cashierAccount: p.floatAccountName || 'Main Cash Control Account',
+            currencyCode: p.currency.code,
+            paymentDocNo: p.paymentVoucherNo || p.docNo,
+            paymentDate: p.paymentDate,
+            cashAdvanceType: p.cashAdvanceType,
+            amount: toDecimal(p.amount),
+            settleAmount: settleDec,
+            settleBaseAmount: settleBase,
+            amountBaseAmount: amtBase,
+            floatAccountId: p.floatAccountId,
+            remark: item.remark || p.narration || '',
+          });
+        }
+      }
+
+      const docNo =
+        dto.docNo && !(await tx.cashierPayoutReimbursement.findUnique({ where: { docNo: dto.docNo } }))
+          ? dto.docNo
+          : `PRD-${new Date().getUTCFullYear()}-${String(Date.now()).slice(-5)}`;
+
+      const reimb = await tx.cashierPayoutReimbursement.create({
+        data: {
+          docNo,
+          docDate: parseDateOnly(dto.docDate),
+          fromDate: parseDateOnly(dto.fromDate),
+          toDate: parseDateOnly(dto.toDate),
+          companyId: scope.companyId,
+          branchId: scope.branchId,
+          bankAccountId: dto.bankAccountId || null,
+          bankAccountName: dto.bankAccountName,
+          baseCurrencyCode: baseInfo.code,
+          totalAmount: toPrismaDecimal(totalAmountBase),
+          totalSettledAmount: toPrismaDecimal(totalSettledBase),
+          status: 'Completed',
+          remark: dto.remark || '',
+          createdById: user.id,
+          createUserId: user.id,
+          updateUserId: user.id,
+        },
+      });
+
+      await tx.cashierPayoutReimbursementItem.createMany({
+        data: preparedItems.map((i) => ({
+          reimbursementId: reimb.id,
+          sourceTable: i.sourceTable,
+          sourcePaymentId: i.sourcePaymentId,
+          cashierName: i.cashierName,
+          cashierAccount: i.cashierAccount,
+          currencyCode: i.currencyCode,
+          paymentDocNo: i.paymentDocNo,
+          paymentDate: i.paymentDate,
+          cashAdvanceType: i.cashAdvanceType,
+          amount: toPrismaDecimal(i.amount),
+          settleAmount: toPrismaDecimal(i.settleAmount),
+          remark: i.remark,
+          createUserId: user.id,
+          updateUserId: user.id,
+        })),
+      });
+
+      // Atomically mark each source payment reimbursed & replenish float account
+      for (const i of preparedItems) {
+        if (i.sourceTable === 'cashier_payment') {
+          const upd = await tx.cashierPayment.updateMany({
+            where: { id: i.sourcePaymentId, isReimbursed: false },
+            data: {
+              isReimbursed: true,
+              reimbursedAmount: toPrismaDecimal(i.settleAmount),
+              reimbursementId: reimb.id,
+              approvalStatus: 'Reimbursed',
+              updateUserId: user.id,
+            },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Duplicate reimbursement blocked for ${i.paymentDocNo}.`);
+          }
+        } else {
+          const upd = await tx.mainCashierPayment.updateMany({
+            where: { id: i.sourcePaymentId, isReimbursed: false },
+            data: {
+              isReimbursed: true,
+              reimbursedAmount: toPrismaDecimal(i.settleAmount),
+              reimbursementId: reimb.id,
+              approvalStatus: 'Reimbursed',
+              updateUserId: user.id,
+            },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Duplicate reimbursement blocked for ${i.paymentDocNo}.`);
+          }
+        }
+
+        if (i.floatAccountId) {
+          await tx.floatAccount.update({
+            where: { id: i.floatAccountId },
+            data: {
+              currentBalance: { increment: toPrismaDecimal(i.settleAmount) },
+              updateUserId: user.id,
+            },
+          });
+        }
+      }
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'CashierPayoutReimbursement',
+          recordId: reimb.id,
+          recordCode: reimb.docNo,
+          newValues: { ...reimb, itemCount: preparedItems.length },
+          actor: user,
+          tx,
+        });
+      }
+
+      await this.auditService.log({
+        entityType: 'cashier_payout_reimbursement',
+        entityId: reimb.id,
+        docNo: reimb.docNo,
+        action: 'REIMBURSE',
+        step: `Settled ${preparedItems.length} Cashier Payout Advance(s) to ${dto.bankAccountName} (${baseInfo.code} ${toNumber(totalSettledBase)})`,
+        toStatus: 'Completed',
+        performedById: user.id,
+        performedByName: user.fullName,
+        tx,
+      });
+
+      return reimb.id;
+    });
+
+    const list = await this.listPayoutReimbursements(user);
+    return list.find((r) => r.id === createdId);
+  }
+
+  // ============================================================================
+  // TAB 9: BANK RECONCILIATION — DEPOSIT CONTROL ACCOUNT (SAP B1 STYLE)
+  // ============================================================================
+
+  async getDepositControlTransactions(
+    user: AuthenticatedUser,
+    query?: { fromDate?: string; toDate?: string; companyId?: number; accountName?: string },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const dateFilter: Prisma.DateTimeFilter = {};
+    if (query?.fromDate) dateFilter.gte = parseDateOnly(query.fromDate);
+    if (query?.toDate) dateFilter.lte = parseDateOnly(query.toDate);
+    const hasDate = Boolean(query?.fromDate || query?.toDate);
+
+    const mcsWhere: Prisma.MainCashierSettlementWhereInput = {
+      isReconciled: false,
+      status: { notIn: ['Draft', 'Cancelled', 'Reversed'] },
+      ...(hasDate ? { docDate: dateFilter } : {}),
+    };
+    const prWhere: Prisma.CashierPayoutReimbursementWhereInput = {
+      isReconciled: false,
+      ...(hasDate ? { docDate: dateFilter } : {}),
+    };
+    const srWhere: Prisma.SalesReconciliationWhereInput = {
+      isDepositReconciled: false,
+      status: { notIn: ['Cancelled', 'Reversed'] },
+      totalCollectionBase: { gt: 0 },
+      ...(hasDate ? { docDate: dateFilter } : {}),
+    };
+    const obdWhere: Prisma.OutletBankDepositWhereInput = {
+      isReconciled: false,
+      processFlowDecision: 'bank',
+      ...(hasDate ? { depositDate: dateFilter } : {}),
+    };
+
+    applyEntityScopeToWhere(mcsWhere as Record<string, unknown>, scope, { companyId: query?.companyId }, { includeOutlet: true });
+    applyEntityScopeToWhere(prWhere as Record<string, unknown>, scope, { companyId: query?.companyId }, { includeBranch: true });
+    applyEntityScopeToWhere(srWhere as Record<string, unknown>, scope, { companyId: query?.companyId }, { includeOutlet: true });
+    applyEntityScopeToWhere(obdWhere as Record<string, unknown>, scope, { companyId: query?.companyId }, { includeBranch: true, allowNullOutlet: true });
+
+    const [mainSettlements, payoutReimbs, salesRecons, outletBankDeps] = await Promise.all([
+      this.prisma.mainCashierSettlement.findMany({
+        where: mcsWhere,
+        include: { outlet: true },
+        orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+      }),
+      this.prisma.cashierPayoutReimbursement.findMany({
+        where: prWhere,
+        orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+      }),
+      this.prisma.salesReconciliation.findMany({
+        where: srWhere,
+        include: { outlet: true },
+        orderBy: [{ docDate: 'desc' }, { id: 'desc' }],
+      }),
+      this.prisma.outletBankDeposit.findMany({
+        where: obdWhere,
+        include: { outlet: true, currency: true },
+        orderBy: [{ depositDate: 'desc' }, { id: 'desc' }],
+      }),
+    ]);
+
+    const receive = [
+      ...mainSettlements.map((s) => ({
+        key: `cashier_deposit:${s.id}`,
+        side: 'receive' as const,
+        sourceType: 'cashier_deposit' as const,
+        sourceId: s.id,
+        documentDate: formatIsoDate(s.docDate),
+        documentType: 'Cashier Deposit',
+        documentNo: s.docNo,
+        description: s.narration || `Cash Direct Deposit (${s.fromCashierName} → ${s.toBankName})`,
+        currencyCode: s.baseCurrencyCode || 'USD',
+        amount: toNumber(s.totalTransferBase),
+        reconciled: false,
+      })),
+      ...payoutReimbs.map((r) => ({
+        key: `payout_reimbursement:${r.id}`,
+        side: 'receive' as const,
+        sourceType: 'payout_reimbursement' as const,
+        sourceId: r.id,
+        documentDate: formatIsoDate(r.docDate),
+        documentType: 'Pay Out Reimbursement Deposit',
+        documentNo: r.docNo,
+        description: r.remark || `Cashier Reimbursement (${r.bankAccountName})`,
+        currencyCode: r.baseCurrencyCode || 'USD',
+        amount: toNumber(r.totalSettledAmount),
+        reconciled: false,
+      })),
+      ...salesRecons.map((sr) => ({
+        key: `direct_sales_deposit:${sr.id}`,
+        side: 'receive' as const,
+        sourceType: 'direct_sales_deposit' as const,
+        sourceId: sr.id,
+        documentDate: formatIsoDate(sr.docDate),
+        documentType: 'Direct Sales Deposit',
+        documentNo: sr.docNo,
+        description: sr.remark || `Direct Sales Deposit — ${sr.outlet.name}`,
+        currencyCode: sr.baseCurrencyCode || 'USD',
+        amount: toNumber(sr.totalCollectionBase),
+        reconciled: false,
+      })),
+    ].sort((a, b) => String(b.documentDate || '').localeCompare(String(a.documentDate || '')));
+
+    const pay = outletBankDeps
+      .map((d) => ({
+        key: `outlet_bank_settlement:${d.id}`,
+        side: 'pay' as const,
+        sourceType: 'outlet_bank_settlement' as const,
+        sourceId: d.id,
+        documentDate: formatIsoDate(d.depositDate),
+        documentType: 'Outlet Cash Sales – Bank Settlement',
+        documentNo: d.docNo,
+        description: d.remark || `${d.outlet?.name || 'Outlet'} Settlement (${d.depositBankRefNo})`,
+        currencyCode: d.currency?.code || 'USD',
+        amount: toNumber(d.settledAmount || d.totalCollectionAmount),
+        reconciled: false,
+      }))
+      .sort((a, b) => String(b.documentDate || '').localeCompare(String(a.documentDate || '')));
+
+    return {
+      accountName: query?.accountName || 'Deposit Control Account',
+      fromDate: query?.fromDate || '',
+      toDate: query?.toDate || '',
+      receive,
+      pay,
+      totalReceiveAmount: Number(receive.reduce((s, x) => s + x.amount, 0).toFixed(2)),
+      totalPayAmount: Number(pay.reduce((s, x) => s + x.amount, 0).toFixed(2)),
+    };
+  }
+
+  async executeDepositControlReconciliation(
+    user: AuthenticatedUser,
+    dto: ExecuteDepositControlReconciliationDto,
+  ) {
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException('Select at least one Receive or Pay transaction to reconcile.');
+    }
+    const scope = await this.resolveScopeWithFallback(user, { companyId: dto.companyId });
+    const baseInfo = await this.fxResolver.getSystemBaseCurrency();
+
+    const totalReceive = dto.items
+      .filter((i) => i.side === 'receive')
+      .reduce((sum, i) => sum.plus(toDecimal(i.amount)), new Decimal(0));
+    const totalPay = dto.items
+      .filter((i) => i.side === 'pay')
+      .reduce((sum, i) => sum.plus(toDecimal(i.amount)), new Decimal(0));
+    const balance = roundMoney(totalReceive.minus(totalPay));
+
+    const createdId = await this.prisma.$transaction(async (tx) => {
+      // Mark every selected source record reconciled atomically (rejecting duplicates)
+      for (const item of dto.items) {
+        if (item.sourceType === 'cashier_deposit') {
+          const upd = await tx.mainCashierSettlement.updateMany({
+            where: { id: item.sourceId, isReconciled: false },
+            data: { isReconciled: true, updateUserId: user.id },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Transaction ${item.documentNo} is already reconciled.`);
+          }
+        } else if (item.sourceType === 'payout_reimbursement') {
+          const upd = await tx.cashierPayoutReimbursement.updateMany({
+            where: { id: item.sourceId, isReconciled: false },
+            data: { isReconciled: true, updateUserId: user.id },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Transaction ${item.documentNo} is already reconciled.`);
+          }
+        } else if (item.sourceType === 'direct_sales_deposit') {
+          const upd = await tx.salesReconciliation.updateMany({
+            where: { id: item.sourceId, isDepositReconciled: false },
+            data: { isDepositReconciled: true, updateUserId: user.id },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Transaction ${item.documentNo} is already reconciled.`);
+          }
+        } else if (item.sourceType === 'outlet_bank_settlement') {
+          const upd = await tx.outletBankDeposit.updateMany({
+            where: { id: item.sourceId, isReconciled: false },
+            data: { isReconciled: true, updateUserId: user.id },
+          });
+          if (upd.count === 0) {
+            throw new BadRequestException(`Transaction ${item.documentNo} is already reconciled.`);
+          }
+        }
+      }
+
+      const docNo = `DCR-${new Date().getUTCFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+      const recon = await tx.depositControlReconciliation.create({
+        data: {
+          docNo,
+          reconciliationDate: parseDateOnly(dto.reconciliationDate),
+          fromDate: parseDateOnly(dto.fromDate),
+          toDate: parseDateOnly(dto.toDate),
+          companyId: scope.companyId,
+          reconciliationAccountName: dto.reconciliationAccountName || 'Deposit Control Account',
+          currencyCode: dto.currencyCode || baseInfo.code,
+          totalReceiveAmount: toPrismaDecimal(totalReceive),
+          totalPayAmount: toPrismaDecimal(totalPay),
+          balanceAmount: toPrismaDecimal(balance),
+          remarks: dto.remarks || '',
+          status: 'Reconciled',
+          reconciledById: user.id,
+          reconciledByName: user.fullName,
+          createUserId: user.id,
+          updateUserId: user.id,
+        },
+      });
+
+      await tx.depositControlReconciliationItem.createMany({
+        data: dto.items.map((item) => ({
+          reconciliationId: recon.id,
+          side: item.side,
+          sourceType: item.sourceType,
+          sourceId: item.sourceId,
+          documentType: item.documentType,
+          documentNo: item.documentNo,
+          documentDate: parseDateOnly(item.documentDate),
+          description: item.description || '',
+          currencyCode: item.currencyCode,
+          amount: toPrismaDecimal(item.amount),
+        })),
+      });
+
+      if (this.changeLogService) {
+        await this.changeLogService.logCreate({
+          tableName: 'DepositControlReconciliation',
+          recordId: recon.id,
+          recordCode: recon.docNo,
+          newValues: { ...recon, itemCount: dto.items.length },
+          actor: user,
+          tx,
+        });
+      }
+
+      await this.auditService.log({
+        entityType: 'deposit_control_reconciliation',
+        entityId: recon.id,
+        docNo: recon.docNo,
+        action: 'RECONCILE',
+        step: `Reconciled ${dto.items.length} transaction(s) in ${recon.reconciliationAccountName} (Receive: ${toNumber(totalReceive)}, Pay: ${toNumber(totalPay)}, Balance: ${toNumber(balance)})`,
+        toStatus: 'Reconciled',
+        performedById: user.id,
+        performedByName: user.fullName,
+        remarks: dto.remarks || null,
+        tx,
+      });
+
+      return recon.id;
+    });
+
+    const history = await this.listDepositControlHistory(user, { companyId: scope.companyId });
+    return history.find((h) => h.id === createdId);
+  }
+
+  async listDepositControlHistory(
+    user: AuthenticatedUser,
+    query?: { companyId?: number },
+  ) {
+    const scope = await getEffectiveScope(this.prisma, user);
+    const where: Prisma.DepositControlReconciliationWhereInput = {};
+    if (query?.companyId) {
+      where.companyId = query.companyId;
+    } else if (!scope.unrestricted && scope.companyIds.length > 0) {
+      where.companyId = { in: scope.companyIds };
+    }
+
+    const rows = await this.prisma.depositControlReconciliation.findMany({
+      where,
+      include: { company: true, items: true },
+      orderBy: [{ reconciliationDate: 'desc' }, { id: 'desc' }],
+    });
+
+    return rows.map((r) => ({
+      id: r.id,
+      docNo: r.docNo,
+      reconciliationDate: formatIsoDate(r.reconciliationDate),
+      fromDate: formatIsoDate(r.fromDate),
+      toDate: formatIsoDate(r.toDate),
+      companyId: r.companyId,
+      company: r.company.name,
+      reconciliationAccountName: r.reconciliationAccountName,
+      currencyCode: r.currencyCode,
+      totalReceiveAmount: toNumber(r.totalReceiveAmount),
+      totalPayAmount: toNumber(r.totalPayAmount),
+      balanceAmount: toNumber(r.balanceAmount),
+      remarks: r.remarks || '',
+      status: r.status,
+      reconciledByName: r.reconciledByName || '',
+      items: r.items.map((i) => ({
+        id: i.id,
+        side: i.side,
+        sourceType: i.sourceType,
+        sourceId: i.sourceId,
+        documentType: i.documentType,
+        documentNo: i.documentNo,
+        documentDate: formatIsoDate(i.documentDate),
+        description: i.description || '',
+        currencyCode: i.currencyCode,
+        amount: toNumber(i.amount),
+      })),
+    }));
   }
 }

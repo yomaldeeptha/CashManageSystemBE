@@ -85,14 +85,24 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     if (process.env.NODE_ENV === 'test' && process.env.SKIP_PRISMA_CONNECT === 'true') {
       return;
     }
-    try {
-      await this.$connect();
-    } catch (error) {
-      this.logger.error(
-        'Failed to connect to PostgreSQL on startup',
-        error instanceof Error ? error.stack : String(error),
-      );
-      throw error;
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.$connect();
+        return;
+      } catch (error) {
+        if (attempt === maxAttempts) {
+          this.logger.error(
+            'Failed to connect to PostgreSQL on startup after retries',
+            error instanceof Error ? error.stack : String(error),
+          );
+          throw error;
+        }
+        this.logger.warn(
+          `PostgreSQL startup connect attempt ${attempt}/${maxAttempts} failed; retrying in 2s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
     }
   }
 

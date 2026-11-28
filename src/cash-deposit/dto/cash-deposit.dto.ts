@@ -17,6 +17,12 @@ export class CashDepositCurrencyLineDto {
   @IsNotEmpty()
   currency!: string;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  submittedAmount?: number;
+
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -44,6 +50,15 @@ export class CreateCashDepositDto {
   @IsOptional()
   @IsString()
   collectionTime?: string;
+
+  @IsOptional()
+  @IsIn(['manual', 'envelope'])
+  collectionMode?: 'manual' | 'envelope';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  sourceReconId?: number;
 
   @Type(() => Number)
   @IsInt()
@@ -82,6 +97,10 @@ export class CreateCashDepositDto {
   @IsOptional()
   @IsString()
   remark?: string;
+
+  @IsOptional()
+  @IsString()
+  differenceNarration?: string;
 
   @IsOptional()
   @IsIn(['Draft', 'Submitted', 'Handover Verified'])
@@ -123,9 +142,23 @@ export class CreateCashierPaymentDto {
   @IsInt()
   branchId?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
-  outletId!: number;
+  outletId?: number;
+
+  @IsOptional()
+  @IsString()
+  cashierLevel?: string;
+
+  @IsOptional()
+  @IsString()
+  payeeType?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  payeeEmployeeId?: number;
 
   @IsOptional()
   @Type(() => Number)
@@ -260,13 +293,24 @@ export class CreateCashierSettlementDto {
   @IsInt()
   branchId?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
-  outletId!: number;
+  outletId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  fromCashierId?: number;
 
   @IsString()
   @IsNotEmpty()
   fromCashier!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  toCashierId?: number;
 
   @IsString()
   @IsNotEmpty()
@@ -280,6 +324,20 @@ export class CreateCashierSettlementDto {
   @IsOptional()
   @IsString()
   floatAccountName?: string;
+
+  @IsOptional()
+  @IsString()
+  localCurrencyCode?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  currentBalanceLocal?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  transferToValueLocal?: number;
 
   @IsOptional()
   @IsString()
@@ -345,9 +403,10 @@ export class CreateCollectionReceiptDto {
   @IsInt()
   branchId?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
-  outletId!: number;
+  outletId?: number;
 
   @IsOptional()
   @Type(() => Number)
@@ -379,13 +438,13 @@ export class CreateCollectionReceiptDto {
   @IsInt()
   bankAccountId?: number;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  bankAccount!: string;
+  bankAccount?: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  cashAccount!: string;
+  cashAccount?: string;
 
   @IsOptional()
   @IsString()
@@ -423,9 +482,10 @@ export class CreateMainCashierSettlementDto {
   @IsInt()
   branchId?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
-  outletId!: number;
+  outletId?: number;
 
   @IsString()
   @IsNotEmpty()
@@ -456,6 +516,17 @@ export class CreateMainCashierSettlementDto {
   @ValidateNested({ each: true })
   @Type(() => SettlementLineInputDto)
   rows!: SettlementLineInputDto[];
+}
+
+export class OutletBankDepositItemInputDto {
+  @Type(() => Number)
+  @IsInt()
+  cashDepositId!: number;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  settledAmount!: number;
 }
 
 export class CreateOutletBankDepositDto {
@@ -518,6 +589,12 @@ export class CreateOutletBankDepositDto {
   cashDepositIds?: number[];
 
   @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OutletBankDepositItemInputDto)
+  items?: OutletBankDepositItemInputDto[];
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
@@ -526,6 +603,140 @@ export class CreateOutletBankDepositDto {
   @IsOptional()
   @IsString()
   remark?: string;
+}
+
+export class CreatePayoutReimbursementItemDto {
+  @IsIn(['cashier_payment', 'main_cashier_payment'])
+  sourceTable!: 'cashier_payment' | 'main_cashier_payment';
+
+  @Type(() => Number)
+  @IsInt()
+  sourcePaymentId!: number;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  settleAmount!: number;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}
+
+export class CreatePayoutReimbursementDto {
+  @IsOptional()
+  @IsString()
+  docNo?: string;
+
+  @IsOptional()
+  @IsString()
+  docDate?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fromDate!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  toDate!: string;
+
+  @Type(() => Number)
+  @IsInt()
+  companyId!: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  branchId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  bankAccountId?: number;
+
+  @IsString()
+  @IsNotEmpty()
+  bankAccountName!: string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreatePayoutReimbursementItemDto)
+  items!: CreatePayoutReimbursementItemDto[];
+}
+
+export class ExecuteDepositControlReconciliationItemDto {
+  @IsIn(['receive', 'pay'])
+  side!: 'receive' | 'pay';
+
+  @IsIn(['cashier_deposit', 'payout_reimbursement', 'direct_sales_deposit', 'outlet_bank_settlement'])
+  sourceType!: 'cashier_deposit' | 'payout_reimbursement' | 'direct_sales_deposit' | 'outlet_bank_settlement';
+
+  @Type(() => Number)
+  @IsInt()
+  sourceId!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  documentType!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  documentNo!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  documentDate!: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  currencyCode!: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  amount!: number;
+}
+
+export class ExecuteDepositControlReconciliationDto {
+  @IsOptional()
+  @IsString()
+  reconciliationDate?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  fromDate!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  toDate!: string;
+
+  @Type(() => Number)
+  @IsInt()
+  companyId!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  reconciliationAccountName!: string;
+
+  @IsOptional()
+  @IsString()
+  currencyCode?: string;
+
+  @IsOptional()
+  @IsString()
+  remarks?: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ExecuteDepositControlReconciliationItemDto)
+  items!: ExecuteDepositControlReconciliationItemDto[];
 }
 
 export class ImportBankStatementRowDto {

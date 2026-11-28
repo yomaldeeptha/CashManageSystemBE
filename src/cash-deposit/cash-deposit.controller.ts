@@ -20,6 +20,8 @@ import {
   CreateCollectionReceiptDto,
   CreateMainCashierSettlementDto,
   CreateOutletBankDepositDto,
+  CreatePayoutReimbursementDto,
+  ExecuteDepositControlReconciliationDto,
   ImportBankStatementDto,
 } from './dto/cash-deposit.dto';
 import { ApprovalDecisionDto } from '../approvals/dto/approvals.dto';
@@ -31,6 +33,38 @@ export class CashDepositController {
   constructor(private readonly service: CashDepositService) {}
 
   // ---- Screen 01: Outlet Cash Collection ----
+  @Get('cash-deposits/pending-envelopes')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'List pending Security Envelopes from daily outlet shift/day-end closings' })
+  listPendingEnvelopes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+  ) {
+    return this.service.listPendingEnvelopes(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+    });
+  }
+
+  @Get('cash-deposit/balance-in-hand')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'Get real-time cashier balance in hand by currency and level' })
+  getBalanceInHand(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('currency') currency?: string,
+    @Query('companyId') companyId?: string,
+    @Query('floatAccountId') floatAccountId?: string,
+    @Query('cashierLevel') cashierLevel?: string,
+  ) {
+    return this.service.getBalanceInHand(user, {
+      currency,
+      companyId: companyId ? Number(companyId) : undefined,
+      floatAccountId: floatAccountId ? Number(floatAccountId) : undefined,
+      cashierLevel,
+    });
+  }
+
   @Get('cash-deposits')
   @RequirePermission('cashDeposit', 'read')
   @ApiOperation({ summary: 'List Outlet Cash Collection slips (scoped & paginated)' })
@@ -62,7 +96,7 @@ export class CashDepositController {
 
   @Post('cash-deposits')
   @RequirePermission('cashDeposit', 'create')
-  @ApiOperation({ summary: 'Create a new Outlet Cash Collection slip with server-side FX calculation' })
+  @ApiOperation({ summary: 'Create a new Outlet Cash Collection slip with server-side FX & difference validation' })
   createDeposit(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateCashDepositDto) {
     return this.service.createDeposit(user, dto);
   }
@@ -138,7 +172,31 @@ export class CashDepositController {
     return this.service.reverseDeposit(user, id, body?.reason);
   }
 
-  // ---- Screen 02: Cashier Payment ----
+  // ---- Screen 02 & 07: Consolidated Cashier Payment & Main Cashier Payment ----
+  @Get('cash-deposit/payments/consolidated')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'List consolidated Assistant & Main Cashier Payments with cashierLevel & pending filters' })
+  listConsolidatedPayments(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+    @Query('cashierLevel') cashierLevel?: string,
+    @Query('pendingOnly') pendingOnly?: string,
+    @Query('status') status?: string,
+    @Query('type') type?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.service.listConsolidatedPayments(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+      cashierLevel,
+      pendingOnly: pendingOnly === 'true',
+      status,
+      type,
+      search,
+    });
+  }
+
   @Get('cash-deposit/payments')
   @RequirePermission('cashDeposit', 'read')
   @ApiOperation({ summary: 'List Cashier Payment / Spending Vouchers' })
@@ -189,7 +247,7 @@ export class CashDepositController {
 
   @Post('cash-deposit/settlements')
   @RequirePermission('cashDeposit', 'create')
-  @ApiOperation({ summary: 'Create a Cashier Shift/Day-End Settlement' })
+  @ApiOperation({ summary: 'Create a Cashier Settlement' })
   createSettlement(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCashierSettlementDto,
@@ -207,10 +265,51 @@ export class CashDepositController {
     return this.service.acceptSettlement(user, id);
   }
 
+  // ---- Cashier Payout Reimbursement ----
+  @Get('cash-deposit/payout-reimbursements/pending')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'List pending (un-reimbursed) Cashier Payout Advances within a date range' })
+  listPendingPayouts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.service.listPendingPayoutsForReimbursement(user, {
+      fromDate,
+      toDate,
+      companyId: companyId ? Number(companyId) : undefined,
+    });
+  }
+
+  @Get('cash-deposit/payout-reimbursements')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'List completed Cashier Payout Reimbursements' })
+  listPayoutReimbursements(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.service.listPayoutReimbursements(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+      search,
+    });
+  }
+
+  @Post('cash-deposit/payout-reimbursements')
+  @RequirePermission('cashDeposit', 'create')
+  @ApiOperation({ summary: 'Settle selected Cashier Payout Advances by transferring to Main Bank Account' })
+  createPayoutReimbursement(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreatePayoutReimbursementDto,
+  ) {
+    return this.service.createPayoutReimbursement(user, dto);
+  }
+
   // ---- Screen 05: Main Cash Collection Receipt ----
   @Get('cash-deposit/receipts')
   @RequirePermission('cashDeposit', 'read')
-  @ApiOperation({ summary: 'List Main Cash Collection Official Receipts' })
+  @ApiOperation({ summary: 'List Main Cashier Cash Collection Registry' })
   listReceipts(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
@@ -242,11 +341,13 @@ export class CashDepositController {
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
     @Query('outletId') outletId?: string,
+    @Query('pendingOnly') pendingOnly?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listMainCashierPayments(user, {
       companyId: companyId ? Number(companyId) : undefined,
       outletId,
+      pendingOnly: pendingOnly === 'true',
       search,
     });
   }
@@ -280,18 +381,20 @@ export class CashDepositController {
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
     @Query('outletId') outletId?: string,
+    @Query('status') status?: string,
     @Query('search') search?: string,
   ) {
     return this.service.listMainCashierSettlements(user, {
       companyId: companyId ? Number(companyId) : undefined,
       outletId,
+      status,
       search,
     });
   }
 
   @Post('cash-deposit/main-settlements')
   @RequirePermission('cashDeposit', 'create')
-  @ApiOperation({ summary: 'Submit Main Cashier Settlement (Screen 08)' })
+  @ApiOperation({ summary: 'Create Main Cashier Settlement (Draft or Submitted)' })
   createMainSettlement(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateMainCashierSettlementDto,
@@ -310,10 +413,28 @@ export class CashDepositController {
     return this.service.saveMainCashierSettlement(user, dto, id);
   }
 
-  // ---- Screen 06: Outlet Bank Deposit ----
+  // ---- Screen 06: Outlet Cash Sales – Bank Settlement ----
+  @Get('cash-deposit/bank-deposits/unsettled')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'Retrieve unsettled Cash Collection slips within a date range for Bank Settlement' })
+  listUnsettledCollections(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+    @Query('companyId') companyId?: string,
+    @Query('outletId') outletId?: string,
+  ) {
+    return this.service.listUnsettledCollections(user, {
+      fromDate,
+      toDate,
+      companyId: companyId ? Number(companyId) : undefined,
+      outletId,
+    });
+  }
+
   @Get('cash-deposit/bank-deposits')
   @RequirePermission('cashDeposit', 'read')
-  @ApiOperation({ summary: 'List Outlet-wise Cash Sale Bank Deposits' })
+  @ApiOperation({ summary: 'List Outlet Cash Sales – Bank Settlements' })
   listBankDeposits(
     @CurrentUser() user: AuthenticatedUser,
     @Query('companyId') companyId?: string,
@@ -329,7 +450,7 @@ export class CashDepositController {
 
   @Post('cash-deposit/bank-deposits')
   @RequirePermission('cashDeposit', 'create')
-  @ApiOperation({ summary: 'Post Outlet-wise Bank Deposit or Carry Forward decision with GL entries' })
+  @ApiOperation({ summary: 'Post Outlet Cash Sales – Bank Settlement or Carry Forward with per-line settled amounts' })
   createBankDeposit(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateOutletBankDepositDto,
@@ -337,7 +458,48 @@ export class CashDepositController {
     return this.service.createBankDeposit(user, dto);
   }
 
-  // ---- Tab 9: Bank Reconciliation ----
+  // ---- Tab 9: Bank Reconciliation – Deposit Control Account ----
+  @Get('cash-deposit/deposit-reconciliation/transactions')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'Load unreconciled Receive (Incoming) and Pay (Outgoing) Deposit Control Account transactions' })
+  getDepositControlTransactions(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+    @Query('companyId') companyId?: string,
+    @Query('accountName') accountName?: string,
+  ) {
+    return this.service.getDepositControlTransactions(user, {
+      fromDate,
+      toDate,
+      companyId: companyId ? Number(companyId) : undefined,
+      accountName,
+    });
+  }
+
+  @Post('cash-deposit/deposit-reconciliation/reconcile')
+  @RequirePermission('cashDeposit', 'update')
+  @ApiOperation({ summary: 'Reconcile selected Receive and Pay Deposit Control Account transactions atomically' })
+  executeDepositControlReconciliation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ExecuteDepositControlReconciliationDto,
+  ) {
+    return this.service.executeDepositControlReconciliation(user, dto);
+  }
+
+  @Get('cash-deposit/deposit-reconciliation/history')
+  @RequirePermission('cashDeposit', 'read')
+  @ApiOperation({ summary: 'List completed Deposit Control Account reconciliation batches' })
+  listDepositControlHistory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.service.listDepositControlHistory(user, {
+      companyId: companyId ? Number(companyId) : undefined,
+    });
+  }
+
+  // ---- Legacy Bank Statement Auto-Match Reconciliation ----
   @Get('cash-deposit/bank-reconciliations')
   @RequirePermission('cashDeposit', 'read')
   @ApiOperation({ summary: 'List Outlet Bank Deposit Reconciliations' })

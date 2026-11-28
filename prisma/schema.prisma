@@ -43,8 +43,10 @@ model Company {
   pettyCashBills         PettyCashBillSubmission[]
   pettyCashReturns       PettyCashReturn[]
   floatReimbursements    FloatReimbursement[]
-  salesReconciliations   SalesReconciliation[]
-  varianceIncidents      VarianceIncident[]
+  salesReconciliations          SalesReconciliation[]
+  varianceIncidents             VarianceIncident[]
+  cashierPayoutReimbursements   CashierPayoutReimbursement[]
+  depositControlReconciliations DepositControlReconciliation[]
 
   @@index([isActive])
   @@index([createUserId])
@@ -84,8 +86,9 @@ model Branch {
   pettyCashBills         PettyCashBillSubmission[]
   pettyCashReturns       PettyCashReturn[]
   floatReimbursements    FloatReimbursement[]
-  salesReconciliations   SalesReconciliation[]
-  varianceIncidents      VarianceIncident[]
+  salesReconciliations        SalesReconciliation[]
+  varianceIncidents           VarianceIncident[]
+  cashierPayoutReimbursements CashierPayoutReimbursement[]
 
   @@index([companyId])
   @@index([isActive])
@@ -374,8 +377,9 @@ model BankAccount {
   bank                   Bank                    @relation(fields: [bankId], references: [id], onDelete: Restrict)
   currency               Currency                @relation(fields: [currencyId], references: [id], onDelete: Restrict)
   cashCollectionReceipts CashCollectionReceipt[]
-  mainCashierSettlements MainCashierSettlement[]
-  outletBankDeposits     OutletBankDeposit[]
+  mainCashierSettlements      MainCashierSettlement[]
+  outletBankDeposits          OutletBankDeposit[]
+  cashierPayoutReimbursements CashierPayoutReimbursement[]
 
   @@index([bankId])
   @@index([currencyId])
@@ -1233,11 +1237,17 @@ model CashDeposit {
   cashierId        Int
   cashCollectorId  Int
   paymentTypeId    Int
-  envelopeNo       String    @db.VarChar(100)
-  receiveFrom      String?   @db.VarChar(200)
-  baseCurrencyCode String    @default("USD") @db.VarChar(10)
-  totalBaseAmount  Decimal   @default(0) @db.Decimal(18, 2)
-  status           String    @default("Draft") @db.VarChar(40)
+  envelopeNo          String    @db.VarChar(100)
+  collectionMode      String    @default("envelope") @db.VarChar(20)
+  sourceReconId       Int?
+  receiveFrom         String?   @db.VarChar(200)
+  baseCurrencyCode    String    @default("USD") @db.VarChar(10)
+  totalSubmittedBase  Decimal   @default(0) @db.Decimal(18, 2)
+  totalBaseAmount     Decimal   @default(0) @db.Decimal(18, 2)
+  totalDifferenceBase Decimal   @default(0) @db.Decimal(18, 2)
+  differenceNarration String?   @db.Text
+  isReconciled        Boolean   @default(false)
+  status              String    @default("Draft") @db.VarChar(40)
   remark           String?   @db.Text
   createdById      Int?
   updatedById      Int?
@@ -1269,12 +1279,14 @@ model CashDeposit {
 }
 
 model CashDepositCurrency {
-  id            Int     @id @default(autoincrement())
-  cashDepositId Int
-  currencyId    Int
-  amount        Decimal @db.Decimal(18, 2)
-  exRate        Decimal @db.Decimal(18, 6)
-  baseAmount    Decimal @db.Decimal(18, 2)
+  id              Int     @id @default(autoincrement())
+  cashDepositId   Int
+  currencyId      Int
+  submittedAmount Decimal @default(0) @db.Decimal(18, 2)
+  amount          Decimal @db.Decimal(18, 2)
+  difference      Decimal @default(0) @db.Decimal(18, 2)
+  exRate          Decimal @db.Decimal(18, 6)
+  baseAmount      Decimal @db.Decimal(18, 2)
 
   cashDeposit  CashDeposit @relation(fields: [cashDepositId], references: [id], onDelete: Cascade)
   currency     Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
@@ -1339,6 +1351,12 @@ model CashierPayment {
   receiptNumber      String?  @db.VarChar(80)
   narration          String?  @db.Text
   denominations      Json?
+  cashierLevel       String   @default("Assistant Cashier") @db.VarChar(40)
+  payeeType          String   @default("Vendor") @db.VarChar(30)
+  payeeEmployeeId    Int?
+  isReimbursed       Boolean  @default(false)
+  reimbursedAmount   Decimal  @default(0) @db.Decimal(18, 2)
+  reimbursementId    Int?
   approvalStatus     String   @default("Submitted") @db.VarChar(40)
   approvedByName     String?  @db.VarChar(150)
   createdById        Int?
@@ -1360,6 +1378,7 @@ model CashierPayment {
   @@index([companyId, branchId, outletId])
   @@index([paymentDate])
   @@index([approvalStatus])
+  @@index([isReimbursed])
   @@index([createUserId])
   @@index([updateUserId])
   @@map("cashier_payments")
@@ -1378,10 +1397,13 @@ model CashierSettlement {
   fromCashierName   String    @db.VarChar(150)
   toCashierId       Int?
   toCashierName     String    @db.VarChar(150)
-  floatAccountId    Int?
-  floatAccountName  String    @db.VarChar(180)
-  baseCurrencyCode  String    @default("USD") @db.VarChar(10)
-  totalTransferBase Decimal   @default(0) @db.Decimal(18, 2)
+  floatAccountId       Int?
+  floatAccountName     String    @db.VarChar(180)
+  baseCurrencyCode     String    @default("USD") @db.VarChar(10)
+  localCurrencyCode    String    @default("MVR") @db.VarChar(10)
+  currentBalanceLocal  Decimal   @default(0) @db.Decimal(18, 2)
+  transferToValueLocal Decimal   @default(0) @db.Decimal(18, 2)
+  totalTransferBase    Decimal   @default(0) @db.Decimal(18, 2)
   narration         String?   @db.Text
   status            String    @default("Pending Acceptance") @db.VarChar(40)
   acceptedById      Int?
@@ -1529,6 +1551,12 @@ model MainCashierPayment {
   floatAccountName   String   @db.VarChar(180)
   totalBalanceInHand Decimal  @default(0) @db.Decimal(18, 2)
   balanceCurrency    String   @default("USD") @db.VarChar(10)
+  cashierLevel       String   @default("Main Cashier") @db.VarChar(40)
+  payeeType          String   @default("Vendor") @db.VarChar(30)
+  payeeEmployeeId    Int?
+  isReimbursed       Boolean  @default(false)
+  reimbursedAmount   Decimal  @default(0) @db.Decimal(18, 2)
+  reimbursementId    Int?
   approvalStatus     String   @default("Submitted") @db.VarChar(40)
   approvedByName     String?  @db.VarChar(150)
   receiptNumber      String?  @db.VarChar(80)
@@ -1551,6 +1579,7 @@ model MainCashierPayment {
 
   @@index([companyId, branchId, outletId])
   @@index([paymentDate])
+  @@index([isReimbursed])
   @@index([createUserId])
   @@index([updateUserId])
   @@map("main_cashier_payments")
@@ -1574,6 +1603,7 @@ model MainCashierSettlement {
   totalTransferBase   Decimal  @default(0) @db.Decimal(18, 2)
   narration           String?  @db.Text
   status              String   @default("Submitted") @db.VarChar(40)
+  isReconciled        Boolean  @default(false)
   createdById         Int?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
@@ -1640,6 +1670,7 @@ model OutletBankDeposit {
   balance               Decimal  @default(0) @db.Decimal(18, 2)
   glAccounting          Json?
   status                String   @default("Completed Deposit") @db.VarChar(50)
+  isReconciled          Boolean  @default(false)
   remark                String?  @db.Text
   createdById           Int?
   createdAt             DateTime @default(now())
@@ -1720,6 +1751,114 @@ model BankReconciliation {
   @@index([createUserId])
   @@index([updateUserId])
   @@map("bank_reconciliations")
+}
+
+model CashierPayoutReimbursement {
+  id                 Int      @id @default(autoincrement())
+  docNo              String   @unique @db.VarChar(60)
+  docDate            DateTime @db.Date
+  fromDate           DateTime @db.Date
+  toDate             DateTime @db.Date
+  companyId          Int
+  branchId           Int
+  bankAccountId      Int?
+  bankAccountName    String   @db.VarChar(200)
+  baseCurrencyCode   String   @default("USD") @db.VarChar(10)
+  totalAmount        Decimal  @default(0) @db.Decimal(18, 2)
+  totalSettledAmount Decimal  @default(0) @db.Decimal(18, 2)
+  status             String   @default("Completed") @db.VarChar(40)
+  isReconciled       Boolean  @default(false)
+  remark             String?  @db.Text
+  createdById        Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  createUserId       Int?
+  updateUserId       Int?
+
+  company     Company                          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch      Branch                           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  bankAccount BankAccount?                     @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+  items       CashierPayoutReimbursementItem[]
+
+  @@index([companyId, branchId])
+  @@index([docDate])
+  @@index([isReconciled])
+  @@map("cashier_payout_reimbursements")
+}
+
+model CashierPayoutReimbursementItem {
+  id              Int      @id @default(autoincrement())
+  reimbursementId Int
+  sourceTable     String   @db.VarChar(40)
+  sourcePaymentId Int
+  cashierName     String   @db.VarChar(150)
+  cashierAccount  String   @db.VarChar(180)
+  currencyCode    String   @db.VarChar(10)
+  paymentDocNo    String   @db.VarChar(80)
+  paymentDate     DateTime @db.Date
+  cashAdvanceType String   @db.VarChar(80)
+  amount          Decimal  @default(0) @db.Decimal(18, 2)
+  settleAmount    Decimal  @default(0) @db.Decimal(18, 2)
+  remark          String?  @db.VarChar(255)
+  createUserId    Int?
+  updateUserId    Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  reimbursement CashierPayoutReimbursement @relation(fields: [reimbursementId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceTable, sourcePaymentId])
+  @@index([reimbursementId])
+  @@map("cashier_payout_reimbursement_items")
+}
+
+model DepositControlReconciliation {
+  id                        Int      @id @default(autoincrement())
+  docNo                     String   @unique @db.VarChar(60)
+  reconciliationDate        DateTime @db.Date
+  fromDate                  DateTime @db.Date
+  toDate                    DateTime @db.Date
+  companyId                 Int
+  reconciliationAccountName String   @default("Deposit Control Account") @db.VarChar(200)
+  currencyCode              String   @default("USD") @db.VarChar(10)
+  totalReceiveAmount        Decimal  @default(0) @db.Decimal(18, 2)
+  totalPayAmount            Decimal  @default(0) @db.Decimal(18, 2)
+  balanceAmount             Decimal  @default(0) @db.Decimal(18, 2)
+  remarks                   String?  @db.Text
+  status                    String   @default("Reconciled") @db.VarChar(40)
+  reconciledById            Int?
+  reconciledByName          String?  @db.VarChar(150)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  createUserId              Int?
+  updateUserId              Int?
+
+  company Company                            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  items   DepositControlReconciliationItem[]
+
+  @@index([companyId, reconciliationDate])
+  @@map("deposit_control_reconciliations")
+}
+
+model DepositControlReconciliationItem {
+  id               Int      @id @default(autoincrement())
+  reconciliationId Int
+  side             String   @db.VarChar(20)
+  sourceType       String   @db.VarChar(60)
+  sourceId         Int
+  documentType     String   @db.VarChar(120)
+  documentNo       String   @db.VarChar(80)
+  documentDate     DateTime @db.Date
+  description      String?  @db.VarChar(255)
+  currencyCode     String   @db.VarChar(10)
+  amount           Decimal  @default(0) @db.Decimal(18, 2)
+  createdAt        DateTime @default(now())
+
+  reconciliation DepositControlReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceType, sourceId])
+  @@index([reconciliationId])
+  @@map("deposit_control_reconciliation_items")
 }
 
 // ============================================================================
@@ -2133,6 +2272,7 @@ model SalesReconciliation {
   approvedById        Int?
   approvedAt          DateTime?
   linkedCashDepositId Int?
+  isDepositReconciled Boolean   @default(false)
   createdById         Int?
   updatedById         Int?
   createdAt           DateTime  @default(now())
